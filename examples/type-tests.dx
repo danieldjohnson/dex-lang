@@ -293,3 +293,21 @@ newPair2 : NewPairIntReal = mkNewPair (1, 2.0)
 
 :p fst $ fromNewPair newPair
 > 1
+
+:t
+  x : fst (Int, Bool) = 3
+  x
+> Int
+
+:t
+  x : fst (_, Bool) = 3
+  x
+> Int
+
+:t
+  x : fst _ = 3
+  x
+> Type error:Can't reduce type expression: fst _
+>
+>   x : fst _ = 3
+>   ^^^^^^^^^^^^^

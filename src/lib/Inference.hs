@@ -261,8 +261,11 @@ checkAnn ann = case ann of
 
 checkUType :: UType -> UInferM Type
 checkUType ty = do
-  reduced <- reduceScoped $ withEffects Pure $ checkRho ty TyKind
-  case reduced of
+  block <- buildScoped $ withEffects Pure $ checkRho ty TyKind
+  -- Resolve known type variables.
+  block' <- zonk block
+  scope <- getScope
+  case reduceBlock scope block' of
     Just ty' -> return $ ty'
     Nothing  -> throw TypeErr $ "Can't reduce type expression: " ++ pprint ty
 

@@ -150,14 +150,11 @@ simplifyExpr expr = case expr of
 
 -- TODO: come up with a coherent strategy for ordering these various reductions
 simplifyOp :: Op -> SimplifyM Atom
-simplifyOp op = case op of
-  Fst (PairVal x _) -> return x
-  Snd (PairVal _ y) -> return y
-  SumGet (SumVal _ l r) left -> return $ if left then l else r
-  SumTag (SumVal s _ _) -> return $ s
-  Select p x y -> selectAt (getType x) p x y
-  FromNewtypeCon _ (Con (NewtypeCon _ x)) -> return x
-  _ -> emitOp op
+simplifyOp op = case peepholeRewriteOp op of
+  Just atom -> return atom
+  Nothing -> case op of
+    Select p x y -> selectAt (getType x) p x y
+    _ -> emitOp op
 
 simplifyHof :: Hof -> SimplifyM Atom
 simplifyHof hof = case hof of

@@ -14,8 +14,8 @@ module Embed (emit, emitTo, emitAnn, emitOp, buildDepEffLam, buildLamAux, buildP
               getAllowedEffects, withEffects, modifyAllowedEffects,
               buildLam, EmbedT, Embed, MonadEmbed, buildScoped, wrapDecls, runEmbedT,
               runSubstEmbed, runEmbed, zeroAt, addAt, sumAt, getScope, reduceBlock,
-              app, add, mul, sub, neg, div', andE, iadd, imul, isub, idiv, reduceScoped,
-              select, selectAt, substEmbed, fromPair, getFst, getSnd,
+              app, add, mul, sub, neg, div', andE, iadd, imul, isub, idiv,
+              peepholeRewriteOp, select, selectAt, substEmbed, fromPair, getFst, getSnd,
               emitBlock, unzipTab, buildFor, isSingletonType, emitDecl, withNameHint,
               singletonTypeVal, mapScalars, scopedDecls, embedScoped, extendScope,
               embedExtend, boolToInt, intToReal, boolToReal, reduceAtom,
@@ -497,12 +497,6 @@ traverseAtom def@(_, fAtom) atom = case atom of
 
 -- === partial evaluation using definitions in scope ===
 
-reduceScoped :: MonadEmbed m => m Atom -> m (Maybe Atom)
-reduceScoped m = do
-  block <- buildScoped m
-  scope <- getScope
-  return $ reduceBlock scope block
-
 reduceBlock :: Scope -> Block -> Maybe Atom
 reduceBlock scope (Block decls result) = do
   let localScope = foldMap declAsScope decls
@@ -512,10 +506,11 @@ reduceBlock scope (Block decls result) = do
 
 reduceAtom :: Scope -> Atom -> Atom
 reduceAtom scope x = case x of
-  Var v -> case snd (scope ! v) of
-    -- TODO: worry about effects!
-    LetBound PlainLet expr -> fromMaybe x $ reduceExpr scope expr
-    LetBound NewtypeLet _  -> TC $ NewtypeApp x []
+  -- The variable may not always be in scope (for instance, an unbound type
+  -- variable during inference).
+  Var v -> case envLookup scope v of
+    Just (_, LetBound PlainLet expr) -> fromMaybe x $ reduceExpr scope expr
+    Just (_, LetBound NewtypeLet _)  -> TC $ NewtypeApp x []
     _ -> x
   _ -> x
 
@@ -527,12 +522,24 @@ reduceExpr scope expr = case expr of
     let x' = reduceAtom scope x
     -- TODO: Worry about variable capture. Should really carry a substitution.
     case f' of
-      Lam (Abs b (PureArrow, block)) ->
+      Lam (Abs b (arr, block)) | arr == PureArrow || arr == ImplicitArrow  ->
         reduceBlock scope $ subst (b@>x', scope) block
       TC (NewtypeApp wrapper xs) ->
         Just $ TC $ NewtypeApp wrapper (xs ++ [x'])
       _ -> Nothing
+  Op op -> peepholeRewriteOp $ fmap (reduceAtom scope) op
   _ -> Nothing
+
+-- Try to rewrite an op into an atom by pattern-matching.
+peepholeRewriteOp :: Op -> Maybe Atom
+peepholeRewriteOp op = case op of
+    Fst (PairVal x _) -> Just x
+    Snd (PairVal _ y) -> Just y
+    SumGet (SumVal _ l r) left -> Just $ if left then l else r
+    SumTag (SumVal s _ _) -> Just s
+    Select (BoolVal b) x y -> Just $ if b then x else y
+    FromNewtypeCon _ (Con (NewtypeCon _ x)) -> Just x
+    _ -> Nothing
 
 indexSetSizeE :: MonadEmbed m => Type -> m Atom
 indexSetSizeE (TC con) = case con of
