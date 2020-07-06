@@ -200,11 +200,9 @@ instance Pretty Atom where
 instance Pretty Match where
   -- todo: unify with %fst, %snd, %fromNewtypeCon, etc?
   pretty match = case match of
-    MatchVar (x:>_) -> p x
     MatchPairFst m -> parens $ "MatchPairFst" <+> p m
     MatchPairSnd m -> parens $ "MatchPairSnd" <+> p m
     MatchNewtype ty m -> parens $ ("MatchNewtype" <+> p ty <+> p m)
-    MatchFail atom -> parens $ "MatchFail" <+> p atom
 
 instance Pretty IExpr where
   pretty (ILit v) = p v
