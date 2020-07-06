@@ -17,7 +17,6 @@ import Data.Foldable (fold, toList, asum)
 import Data.Functor
 import Data.String (fromString)
 import Data.Text.Prettyprint.Doc
-import Debug.Trace
 
 import Syntax
 import Embed  hiding (sub)
@@ -448,9 +447,6 @@ solveLocal m = do
     (ans, embedEnv) <- zonk =<< embedScoped m
     embedExtend embedEnv
     return ans
-  -- traceM (
-    -- "solveLocal has " <> pprint freshVars <> " and " <> pprint sub
-    -- <> "\n adding: " <> pprint (unsolved env) <> " and " <> pprint (sub `envDiff` freshVars))
   extend $ SolverEnv (unsolved env) (sub `envDiff` freshVars)
   return ans
 
@@ -503,7 +499,6 @@ unify :: Type -> Type -> UInferM ()
 unify t1 t2 = do
   t1' <- zonk t1
   t2' <- zonk t2
-  -- traceM $ "Unifying: " <> pprint (t1', t2')
   vs <- looks solverVars
   case (t1', t2') of
     _ | t1' == t2' -> return ()
@@ -523,13 +518,7 @@ unify t1 t2 = do
     (Eff eff, Eff eff') -> unifyEff eff eff'
     (t, Match match) -> unifyMatch match t
     (Match match, t) -> unifyMatch match t
-    _ -> do
-      knowns <- looks solverSub
-      -- traceM (
-        -- "Failing to unify: " <> pprint (t1', t2') <> "\n" <> show (t1', t2')
-        -- <> "\n\nSolver vars are:" <> pprint vs
-        -- <> "\n\nSolver subs are:" <> pprint knowns)
-      throw TypeErr ""
+    _ -> throw TypeErr ""
 
 unifyMatch :: Match -> Type -> UInferM ()
 unifyMatch match other = do
@@ -538,25 +527,18 @@ unifyMatch match other = do
   -- trying to unify two matches with each other.
   case match of
     MatchPairFst (Var v) | v `isin` vs -> do
-      old <- looks solverVars
       fstTy <- freshType =<< freshType TyKind
       sndTy <- freshType =<< freshType TyKind
-      new <- looks solverVars
-      -- traceM $ "Introducing fresh vars " <> pprint (new `envDiff` old) <> " for matching: " <> pprint v
       bindQ v $ Con $ PairCon fstTy sndTy
       unify fstTy other
     MatchPairSnd (Var v) | v `isin` vs -> do
-      old <- looks solverVars
       fstTy <- freshType =<< freshType TyKind
       sndTy <- freshType =<< freshType TyKind
-      new <- looks solverVars
-      -- traceM $ "Introducing fresh vars " <> pprint (new `envDiff` old) <> " for matching: " <> pprint v
       bindQ v $ Con $ PairCon fstTy sndTy
       unify sndTy other
     MatchNewtype _ (Var v) | v `isin` vs -> do
       wrapTy <- freshType =<< freshType TyKind
       innerTy <- freshType =<< freshType TyKind
-      -- traceM $ "Introducing fresh vars for matching: " <> pprint v
       bindQ v $ Con $ NewtypeCon wrapTy innerTy
       unify innerTy other
     MatchPairFst (Con (ClassDictHole _)) ->
@@ -592,7 +574,6 @@ bindQ v@(_:>ty) t
           | v `occursIn` t = throw TypeErr $ "Occurs check failure: " ++ pprint (v, t)
           | hasSkolems t = throw TypeErr "Can't unify with skolem vars"
           | otherwise = do
-              -- traceM $ "Binding: " <> pprint (v, t)
               extend $ mempty { solverSub = v @> t }
               -- Unify the kind of our binding with the type of what it is
               -- bound to, in case we have type variables in one of them.

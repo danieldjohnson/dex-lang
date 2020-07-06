@@ -15,12 +15,12 @@ def Bar (a: Type) -> (witness:Foo a) ?=> : Type = FromFoo witness
 > (Fin 2)
 
 
-%passes
+%passes typed
 def BazExplicit (a: Type) -> (witness:Foo a) -> (b:(FromFoo witness)) : FromFoo witness = b
 
 :t BazExplicit
 
-%passes
+%passes typed
 :p BazExplicit (Fin 3) (MkFoo (Fin 2)) (1@(Fin 2))
 
 
