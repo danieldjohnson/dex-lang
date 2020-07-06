@@ -294,6 +294,7 @@ newPair2 : NewPairIntReal = mkNewPair (1, 2.0)
 -- Capitalized version for use in types
 -- (since lowercase names are implicit type arguments)
 def Fst (p: a & b) : a = fst p
+def Snd (p: a & b) : b = snd p
 
 :p Fst $ fromNewPair newPair
 > 1
@@ -311,13 +312,16 @@ def Fst (p: a & b) : a = fst p
 :t
   x : Fst _ = 3
   x
-> Type error:
-> Expected: (MatchPairFst b)
->   Actual: Int
-> (Solving for: [a:Type, b:(Type & ?1)])
+> Type error:Ambiguous type variables: [?1, ?7]
 >
->   x : Fst _ = 3
->               ^
+> ( ()
+> , ( ( x @> (Int, 3)
+> , ?4 @> (Type, <unknown binder>)
+> , ?5 @> (Type, <unknown binder>)
+> , ?6 @> (Type, <unknown binder>)
+> , ?7 @> (?1, <unknown binder>)
+> , _ans_ @> (Int, x) )
+> , [x:Int = 3, _ans_:Int = x] ) )
 
 def testPairOfTypes (a:(Type & Type)) -> (b:(Fst a)) : Fst a = b
 
@@ -326,3 +330,61 @@ def testPairOfTypes (a:(Type & Type)) -> (b:(Fst a)) : Fst a = b
 
 :p testPairOfTypes (Int, Bool) 3
 > 3
+
+def foo (a : (Type & Type)) ?-> (f : (Fst a -> Snd a)) -> (x : Fst a) : Snd a = f x
+
+:t foo
+> (a:(Type & Type)?->(((MatchPairFst a)->(MatchPairSnd a))->((MatchPairFst a)->(MatchPairSnd a))))
+
+-- Infer a based on the type of f.
+%passes typed
+:p foo i2r anyVal
+> === typed ===
+> Module (Typed)
+>   unevaluated decls:
+>   tmp:((Int->Real)->(Int->Real)) = (foo) ((Int , Real))
+>   tmp1:(Int->Real) = (tmp) (i2r)
+>   tmp2:Int = (anyVal) (Int)
+>   tmp3:Real = (tmp1) (tmp2)
+>   _ans_:Real = tmp3
+>   
+>   evaluated bindings:
+>   ()
+> 1.0
+
+
+-- Infer a and the type of f based on the type of x.
+%passes typed
+:p foo (\x. x) 3
+> === typed ===
+> Module (Typed)
+>   unevaluated decls:
+>   tmp:((Int->Int)->(Int->Int)) = (foo) ((Int , Int))
+>   tmp1:(Int->Int) = (tmp) (\x:Int. x)
+>   tmp2:Int = (tmp1) (3)
+>   _ans_:Int = tmp2
+>   
+>   evaluated bindings:
+>   ()
+> 3
+
+
+-- Not enough information to determine result type.
+:p foo (\x. anyVal) 3
+> Type error:Ambiguous type variables: [?6]
+>
+> ( ()
+> , ( ( tmp @> (((Int->?6)->(Int->?6)), (foo) ((Int , ?6)))
+> , tmp1 @> ((Int->?6), (tmp) (\x:Int. (anyVal) (?6)))
+> , tmp2 @> (?6, (tmp1) (3))
+> , ? @> ((Type & Type), <unknown binder>)
+> , ?1 @> (Type, <unknown binder>)
+> , ?3 @> (Type, <unknown binder>)
+> , ?4 @> (Type, <unknown binder>)
+> , ?5 @> (Type, <unknown binder>)
+> , ?6 @> (Type, <unknown binder>)
+> , _ans_ @> (?6, tmp2) )
+> , [ tmp:((Int->?6)->(Int->?6)) = (foo) ((Int , ?6))
+> , tmp1:(Int->?6) = (tmp) (\x:Int. (anyVal) (?6))
+> , tmp2:?6 = (tmp1) (3)
+> , _ans_:?6 = tmp2 ] ) )

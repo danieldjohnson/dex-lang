@@ -17,6 +17,7 @@ import Data.Foldable (fold, toList, asum)
 import Data.Functor
 import Data.String (fromString)
 import Data.Text.Prettyprint.Doc
+import Debug.Trace
 
 import Syntax
 import Embed  hiding (sub)
@@ -447,6 +448,9 @@ solveLocal m = do
     (ans, embedEnv) <- zonk =<< embedScoped m
     embedExtend embedEnv
     return ans
+  -- traceM (
+    -- "solveLocal has " <> pprint freshVars <> " and " <> pprint sub
+    -- <> "\n adding: " <> pprint (unsolved env) <> " and " <> pprint (sub `envDiff` freshVars))
   extend $ SolverEnv (unsolved env) (sub `envDiff` freshVars)
   return ans
 
@@ -479,8 +483,7 @@ freshEff = do
 freshVar :: MonadCat SolverEnv m => ann -> m (VarP ann)
 freshVar ann = looks $ rename (rawName InferenceName "?" :> ann) . solverVars
 
-constrainEq :: (MonadCat SolverEnv m, MonadError Err m)
-             => Type -> Type -> m ()
+constrainEq :: Type -> Type -> UInferM ()
 constrainEq t1 t2 = do
   t1' <- zonk t1
   t2' <- zonk t2
@@ -496,11 +499,11 @@ zonk x = do
   s <- looks solverSub
   return $ scopelessSubst s x
 
-unify :: (MonadCat SolverEnv m, MonadError Err m)
-       => Type -> Type -> m ()
+unify :: Type -> Type -> UInferM ()
 unify t1 t2 = do
   t1' <- zonk t1
   t2' <- zonk t2
+  -- traceM $ "Unifying: " <> pprint (t1', t2')
   vs <- looks solverVars
   case (t1', t2') of
     _ | t1' == t2' -> return ()
@@ -518,10 +521,53 @@ unify t1 t2 = do
     (TC con, TC con') | void con == void con' ->
       zipWithM_ unify (toList con) (toList con')
     (Eff eff, Eff eff') -> unifyEff eff eff'
-    _ -> throw TypeErr ""
+    (t, Match match) -> unifyMatch match t
+    (Match match, t) -> unifyMatch match t
+    _ -> do
+      knowns <- looks solverSub
+      -- traceM (
+        -- "Failing to unify: " <> pprint (t1', t2') <> "\n" <> show (t1', t2')
+        -- <> "\n\nSolver vars are:" <> pprint vs
+        -- <> "\n\nSolver subs are:" <> pprint knowns)
+      throw TypeErr ""
 
-unifyEff :: (MonadCat SolverEnv m, MonadError Err m)
-         => EffectRow -> EffectRow -> m ()
+unifyMatch :: Match -> Type -> UInferM ()
+unifyMatch match other = do
+  vs <- looks solverVars
+  -- Bind to fresh types and then unify, in order to avoid occurs check when
+  -- trying to unify two matches with each other.
+  case match of
+    MatchPairFst (Var v) | v `isin` vs -> do
+      old <- looks solverVars
+      fstTy <- freshType =<< freshType TyKind
+      sndTy <- freshType =<< freshType TyKind
+      new <- looks solverVars
+      -- traceM $ "Introducing fresh vars " <> pprint (new `envDiff` old) <> " for matching: " <> pprint v
+      bindQ v $ Con $ PairCon fstTy sndTy
+      unify fstTy other
+    MatchPairSnd (Var v) | v `isin` vs -> do
+      old <- looks solverVars
+      fstTy <- freshType =<< freshType TyKind
+      sndTy <- freshType =<< freshType TyKind
+      new <- looks solverVars
+      -- traceM $ "Introducing fresh vars " <> pprint (new `envDiff` old) <> " for matching: " <> pprint v
+      bindQ v $ Con $ PairCon fstTy sndTy
+      unify sndTy other
+    MatchNewtype _ (Var v) | v `isin` vs -> do
+      wrapTy <- freshType =<< freshType TyKind
+      innerTy <- freshType =<< freshType TyKind
+      -- traceM $ "Introducing fresh vars for matching: " <> pprint v
+      bindQ v $ Con $ NewtypeCon wrapTy innerTy
+      unify innerTy other
+    MatchPairFst (Con (ClassDictHole _)) ->
+      throw TypeErr "Unification with class dict holes not implemented"
+    MatchPairSnd (Con (ClassDictHole _)) ->
+      throw TypeErr "Unification with class dict holes not implemented"
+    MatchNewtype _ (Con (ClassDictHole _)) ->
+      throw TypeErr "Unification with class dict holes not implemented"
+    _ -> throw TypeErr "Can't reduce match expression!"
+
+unifyEff :: EffectRow -> EffectRow -> UInferM ()
 unifyEff r1 r2 = do
   r1' <- zonk r1
   r2' <- zonk r2
@@ -541,10 +587,16 @@ unifyEff r1 r2 = do
 setDiff :: Eq a => [a] -> [a] -> [a]
 setDiff xs ys = filter (`notElem` ys) xs
 
-bindQ :: (MonadCat SolverEnv m, MonadError Err m) => Var -> Type -> m ()
-bindQ v t | v `occursIn` t = throw TypeErr $ "Occurs check failure: " ++ pprint (v, t)
+bindQ :: Var -> Type -> UInferM ()
+bindQ v@(_:>ty) t
+          | v `occursIn` t = throw TypeErr $ "Occurs check failure: " ++ pprint (v, t)
           | hasSkolems t = throw TypeErr "Can't unify with skolem vars"
-          | otherwise = extend $ mempty { solverSub = v @> t }
+          | otherwise = do
+              -- traceM $ "Binding: " <> pprint (v, t)
+              extend $ mempty { solverSub = v @> t }
+              -- Unify the kind of our binding with the type of what it is
+              -- bound to, in case we have type variables in one of them.
+              unify ty (getType t)
 
 hasSkolems :: HasVars a => a -> Bool
 hasSkolems x = not $ null [() | Name Skolem _ _ <- envNames $ freeVars x]
