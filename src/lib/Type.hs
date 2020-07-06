@@ -89,6 +89,7 @@ instance HasType Atom where
     Con con  -> typeCheckCon con
     TC tyCon -> typeCheckTyCon tyCon
     Eff eff  -> checkEffRow eff $> EffKind
+    Match m -> typeCheck m
 
 instance HasType Expr where
   typeCheck expr = case expr of
@@ -101,6 +102,18 @@ instance HasType Expr where
     Atom x   -> typeCheck x
     Op   op  -> typeCheckOp op
     Hof  hof -> typeCheckHof hof
+
+instance HasType Match where
+  typeCheck match = case match of
+    MatchVar v -> typeCheck $ Var v
+    MatchPairFst m -> do
+      PairTy x _ <- typeCheck m
+      return x
+    MatchPairSnd m -> do
+      PairTy _ x <- typeCheck m
+      return x
+    MatchNewtype toTy m -> toTy|:TyKind >> typeCheck m $> toTy
+    MatchFail atom -> typeCheck atom
 
 -- TODO: replace with something more precise (this is too cautious)
 isPure :: Expr -> Bool
@@ -178,6 +191,7 @@ instance CoreVariant Atom where
     Con e -> checkVariant e >> forM_ e checkVariant
     TC  e -> checkVariant e >> forM_ e checkVariant
     Eff _ -> alwaysAllowed
+    Match match -> goneBy Simp >> checkVariant match
 
 instance CoreVariant Expr where
   checkVariant expr = addExpr expr $ case expr of
@@ -192,6 +206,14 @@ instance CoreVariant Decl where
 
 instance CoreVariant Block where
   checkVariant (Block ds e) = mapM_ checkVariant ds >> checkVariant e
+
+instance CoreVariant Match where
+  checkVariant match = addExpr match $ case match of
+    MatchVar v -> checkVariantVar v
+    MatchPairFst m -> checkVariant m
+    MatchPairSnd m -> checkVariant m
+    MatchNewtype ty m -> checkVariant ty >> checkVariant m
+    MatchFail _ -> neverAllowed
 
 -- TODO: consider adding namespace restrictions
 checkVariantVar :: Var ->  VariantM ()

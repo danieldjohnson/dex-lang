@@ -86,6 +86,18 @@ simplifyAtom atom = case atom of
   Con con -> Con <$> mapM simplifyAtom con
   TC tc -> TC <$> mapM substEmbed tc
   Eff eff -> Eff <$> substEmbed eff
+  Match (MatchVar v) -> simplifyAtom $ Var v
+  Match (MatchPairFst m) -> do
+    inner <- simplifyAtom $ Match m
+    simplifyExpr $ Op $ Fst $ inner
+  Match (MatchPairSnd m) -> do
+    inner <- simplifyAtom $ Match m
+    simplifyExpr $ Op $ Snd $ inner
+  Match (MatchNewtype ty m) -> do
+    inner <- simplifyAtom $ Match m
+    ty' <- simplifyAtom ty
+    simplifyExpr $ Op $ FromNewtypeCon ty' inner
+  Match (MatchFail _) -> error "unreachable; should have been a type error"
   where mkAny t = Con . AnyValue <$> substEmbed t >>= simplifyAtom
 
 -- Unlike `substEmbed`, this simplifies under the binder too.

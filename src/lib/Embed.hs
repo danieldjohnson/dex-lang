@@ -494,6 +494,39 @@ traverseAtom def@(_, fAtom) atom = case atom of
   Con con -> Con <$> traverse fAtom con
   TC  tc  -> TC  <$> traverse fAtom tc
   Eff _   -> substEmbed atom
+  Match match -> traverseMatch def match
+
+traverseMatch :: (MonadEmbed m, MonadReader SubstEnv m)
+              => TraversalDef m -> Match -> m Atom
+traverseMatch def@(_, fAtom) match = case match of
+    MatchVar v -> do
+      atom <- fAtom $ Var v
+      return $ case atom of
+        Var v' -> Match $ MatchVar v'
+        _ -> atom
+    MatchPairFst inner -> do
+      atom <- traverseMatch def inner
+      case atom of
+        Con (PairCon x _) -> fAtom x
+        _ -> return $ fallthrough MatchPairFst atom
+    MatchPairSnd inner -> do
+      atom <- traverseMatch def inner
+      case atom of
+        Con (PairCon _ x) -> fAtom x
+        _ -> return $ fallthrough MatchPairSnd atom
+    MatchNewtype ty inner -> do
+      atom <- traverseMatch def inner
+      ty' <- fAtom ty
+      case atom of
+        Con (NewtypeCon _ x) -> fAtom x
+        _ -> return $ fallthrough (MatchNewtype ty') atom
+    MatchFail atom -> Match . MatchFail <$> fAtom atom
+  where
+    -- fallthrough :: (Match -> Match) -> Atom -> Atom
+    fallthrough rebuild atom = case atom of
+      Var v -> Match $ rebuild $ MatchVar v
+      Match m -> Match $ rebuild m
+      _ -> Match $ rebuild $ MatchFail atom
 
 -- === partial evaluation using definitions in scope ===
 
@@ -527,7 +560,8 @@ reduceExpr scope expr = case expr of
       TC (NewtypeApp wrapper xs) ->
         Just $ TC $ NewtypeApp wrapper (xs ++ [x'])
       _ -> Nothing
-  Op op -> peepholeRewriteOp $ fmap (reduceAtom scope) op
+  Op op -> let op' = fmap (reduceAtom scope) op in
+    peepholeRewriteOp op' <|> (Match <$> reduceOpAsMatch scope op')
   _ -> Nothing
 
 -- Try to rewrite an op into an atom by pattern-matching.
@@ -540,6 +574,20 @@ peepholeRewriteOp op = case op of
     Select (BoolVal b) x y -> Just $ if b then x else y
     FromNewtypeCon _ (Con (NewtypeCon _ x)) -> Just x
     _ -> Nothing
+
+-- Try to rewrite an expression as a match.
+reduceOpAsMatch :: Scope -> Op -> Maybe Match
+reduceOpAsMatch scope op = case op of
+    Fst atom -> do {m <- fromAtom atom; Just $ MatchPairFst m}
+    Snd atom -> do {m <- fromAtom atom; Just $ MatchPairSnd m}
+    FromNewtypeCon ty atom -> do
+      m <- fromAtom atom
+      Just $ MatchNewtype (reduceAtom scope ty) m
+    _ -> Nothing
+  where fromAtom :: Atom -> Maybe Match
+        fromAtom (Var v) = Just $ MatchVar v
+        fromAtom (Match m) = Just m
+        fromAtom _ = Nothing
 
 indexSetSizeE :: MonadEmbed m => Type -> m Atom
 indexSetSizeE (TC con) = case con of
