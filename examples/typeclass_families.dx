@@ -1,0 +1,31 @@
+@newtype
+def Foo (a: Type) : Type = Type
+def MkFoo (a:Type) ?-> (t: Type) : Foo a = unsafeNewtypeCon t
+def FromFoo (d:Foo a) : Type = unsafeFromNewtypeCon d
+
+@instance
+fin3Foo : Foo (Fin 3) = MkFoo (Fin 2)
+
+:p FromFoo fin3Foo
+> (Fin 2)
+
+def Bar (a: Type) -> (witness:Foo a) ?=> : Type = FromFoo witness
+
+:p Bar (Fin 3)
+> (Fin 2)
+
+
+%passes
+def BazExplicit (a: Type) -> (witness:Foo a) -> (b:(FromFoo witness)) : FromFoo witness = b
+
+:t BazExplicit
+
+%passes
+:p BazExplicit (Fin 3) (MkFoo (Fin 2)) (1@(Fin 2))
+
+
+def Baz (a: Type) -> (witness:Foo a) ?=> (b:(FromFoo witness)) : FromFoo witness = b
+
+%passes
+:p Baz (Fin 3) (1@(Fin 2))
+

@@ -291,23 +291,38 @@ NewPairIntReal = NewPair Int Real
 
 newPair2 : NewPairIntReal = mkNewPair (1, 2.0)
 
-:p fst $ fromNewPair newPair
+-- Capitalized version for use in types
+-- (since lowercase names are implicit type arguments)
+def Fst (p: a & b) : a = fst p
+
+:p Fst $ fromNewPair newPair
 > 1
 
 :t
-  x : fst (Int, Bool) = 3
+  x : Fst (Int, Bool) = 3
   x
 > Int
 
 :t
-  x : fst (_, Bool) = 3
+  x : Fst (_, Bool) = 3
   x
 > Int
 
 :t
-  x : fst _ = 3
+  x : Fst _ = 3
   x
-> Type error:Can't reduce type expression: fst _
+> Type error:
+> Expected: (MatchPairFst b)
+>   Actual: Int
+> (Solving for: [a:Type, b:(Type & ?1)])
 >
->   x : fst _ = 3
->   ^^^^^^^^^^^^^
+>   x : Fst _ = 3
+>               ^
+
+def testPairOfTypes (a:(Type & Type)) -> (b:(Fst a)) : Fst a = b
+
+:t testPairOfTypes
+> (a:(Type & Type)->((MatchPairFst a)->(MatchPairFst a)))
+
+:p testPairOfTypes (Int, Bool) 3
+> 3
