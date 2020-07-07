@@ -531,7 +531,9 @@ reduceAtom scope x = case x of
   -- The variable may not always be in scope (for instance, an unbound type
   -- variable during inference).
   Var v -> case envLookup scope v of
-    Just (_, LetBound PlainLet expr) -> fromMaybe x $ reduceExpr scope expr
+    Just (_, LetBound ann expr)
+      | ann == PlainLet || ann == InstanceLet || ann == SuperclassLet 
+      -> fromMaybe x $ reduceExpr scope expr
     Just (_, LetBound NewtypeLet _)  -> TC $ NewtypeApp x []
     _ -> x
   _ -> x

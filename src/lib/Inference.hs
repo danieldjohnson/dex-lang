@@ -33,12 +33,42 @@ data RequiredTy a = Check a | Infer
 
 inferModule :: TopEnv -> UModule -> Except Module
 inferModule scope (UModule decls) = do
-  ((), (_, decls')) <- runUInferM (mapM_ (inferUDecl True) decls) mempty scope
+  ((), (_, decls')) <- runUInferM (inferAllDecls' decls) mempty scope
   return $ Module Typed decls' mempty
 
 runUInferM :: (HasVars a, Pretty a)
            => UInferM a -> SubstEnv -> Scope -> Except (a, (Scope, [Decl]))
 runUInferM m env scope = runSolverT $ runEmbedT (runReaderT m env) scope
+
+inferAllDecls' :: [UDecl] -> UInferM ()
+inferAllDecls' decls = do
+  -- Run inference over all decls.
+  mapM_ (inferUDecl True) decls
+  -- TODO: This is entirely a proof of concept. For now we do inference, then
+  -- discharge all equalities, then re-unify. A more robust solution would
+  -- need to:
+  --  - Selectively choose whether to lift typeclass holes into type vars,
+  --    depending on whether they are used in type position, to ensure that
+  --    value-level typeclasses don't need to be reducible and can be rewritten
+  --    in the synth pass
+  --  - Check for multiple possible typeclass dicts. If some are overlapping,
+  --    it's possible we would only see one now but see more later.
+  --  - Allow some typeclass dictionary synthesis steps to fail, then repeat
+  --    after unification of the deferred unifies, alternating until they are
+  --    all resolved (or we get stuck).
+  dictHoles <- looks unsolvedDictHoles
+  forM_ (envPairs dictHoles) $ \(v, ty) -> do
+    ty' <- zonk ty
+    scope <- getScope
+    (res, (_, dictDecls)) <- liftEither $ runSubstEmbedT (synthDictTop ty') scope
+    reduced <- case reduceBlock scope (Block dictDecls (Atom res)) of
+      Just atom -> return $ atom
+      Nothing -> throw TypeErr $ "Can't reduce type dictionary " <> pprint ty
+    extend $ mempty { solverSub = (v:>()) @> reduced }
+  -- Resolve deferred equalities.
+  defUnif <- looks deferredUnifies
+  forM_ defUnif $ \(a, b) -> constrainEq a b
+
 
 checkSigma :: UExpr -> SigmaType -> UInferM Atom
 checkSigma expr sTy = case sTy of
@@ -70,8 +100,11 @@ instantiateSigma f = case getType f of
     x <- freshType ty
     ans <- emitZonked $ App f x
     instantiateSigma ans
-  Pi (Abs (_:>ty) (ClassArrow, _)) ->
-    instantiateSigma =<< emitZonked (App f (Con $ ClassDictHole ty))
+  Pi (Abs (_:>ty) (ClassArrow, _)) -> do
+    dv <- freshVar ty
+    extend $ SolverEnv mempty (dv @> ty) mempty mempty
+    extendScope $ dv @> (ty, UnknownBinder)
+    instantiateSigma =<< emitZonked (App f (Var dv))
   _ -> return f
 
 checkOrInferRho :: UExpr -> RequiredTy RhoType -> UInferM Atom
@@ -417,8 +450,10 @@ instantiateAndCheck ty x = do
 
 -- === constraint solver ===
 
-data SolverEnv = SolverEnv { solverVars :: Env Kind
-                           , solverSub  :: Env Type }
+data SolverEnv = SolverEnv { solverVars       :: Env Kind
+                           , typeDictVars     :: Env Type
+                           , solverSub        :: Env Atom
+                           , deferredUnifies  :: [(Type, Type)] }
 type SolverT m = CatT SolverEnv m
 
 runSolverT :: (MonadError Err m, HasVars a, Pretty a)
@@ -427,27 +462,33 @@ runSolverT m = liftM fst $ flip runCatT mempty $ do
    ans <- m >>= zonk
    applyDefaults
    ans' <- zonk ans
-   vs <- looks $ envNames . unsolved
+   vs <- looks $ envNames . unsolvedTyVars
    throwIf (not (null vs)) TypeErr $ "Ambiguous type variables: "
                                    ++ pprint vs ++ "\n\n" ++ pprint ans'
+   holes <- looks $ envNames . unsolvedDictHoles
+   throwIf (not (null holes)) TypeErr $ "Unsolved class dicts: "
+                                      ++ pprint holes ++ "\n\n" ++ pprint ans'
    return ans'
 
 applyDefaults :: MonadCat SolverEnv m => m ()
 applyDefaults = do
-  vs <- looks unsolved
+  vs <- looks unsolvedTyVars
   forM_ (envPairs vs) $ \(v, k) -> case k of
     EffKind -> addSub v $ Eff Pure
     _ -> return ()
-  where addSub v ty = extend $ SolverEnv mempty ((v:>()) @> ty)
+  where addSub v ty = extend $ mempty { solverSub = (v:>()) @> ty }
 
 solveLocal :: HasVars a => UInferM a -> UInferM a
 solveLocal m = do
-  (ans, env@(SolverEnv freshVars sub)) <- scoped $ do
+  (ans, SolverEnv freshVars freshDictHoles sub deferred) <- scoped $ do
     -- This might get expensive. TODO: revisit once we can measure performance.
     (ans, embedEnv) <- zonk =<< embedScoped m
     embedExtend embedEnv
     return ans
-  extend $ SolverEnv (unsolved env) (sub `envDiff` freshVars)
+  extend $ SolverEnv  (freshVars `envDiff` sub)
+                      (freshDictHoles `envDiff` sub)
+                      (sub `envDiff` freshVars)
+                      deferred
   return ans
 
 checkLeaks :: HasVars a => [Var] -> UInferM a -> UInferM a
@@ -459,25 +500,30 @@ checkLeaks tvs m = do
   extend env
   return ans
 
-unsolved :: SolverEnv -> Env Kind
-unsolved (SolverEnv vs sub) = vs `envDiff` sub
+unsolvedTyVars :: SolverEnv -> Env Kind
+unsolvedTyVars (SolverEnv vs _ sub _) = vs `envDiff` sub
+
+unsolvedDictHoles :: SolverEnv -> Env Type
+unsolvedDictHoles (SolverEnv _ dicts sub _) = dicts `envDiff` sub
 
 freshType :: Kind -> UInferM Type
 freshType EffKind = Eff <$> freshEff
 freshType k = do
   tv <- freshVar k
-  extend $ SolverEnv (tv @> k) mempty
+  extend $ mempty { solverVars = (tv @> k)}
   extendScope $ tv @> (k, UnknownBinder)
   return $ Var tv
 
 freshEff :: (MonadError Err m, MonadCat SolverEnv m) => m EffectRow
 freshEff = do
   v <- freshVar ()
-  extend $ SolverEnv (v@>EffKind) mempty
+  extend $ mempty { solverVars = (v @> EffKind)}
   return $ EffectRow [] $ Just $ varName v
 
 freshVar :: MonadCat SolverEnv m => ann -> m (VarP ann)
-freshVar ann = looks $ rename (rawName InferenceName "?" :> ann) . solverVars
+freshVar ann = do
+  SolverEnv sVars dictVars _ _ <- look
+  return $ rename (rawName InferenceName "?" :> ann) (sVars <> dictVars)
 
 constrainEq :: Type -> Type -> UInferM ()
 constrainEq t1 t2 = do
@@ -523,6 +569,7 @@ unify t1 t2 = do
 unifyMatch :: Match -> Type -> UInferM ()
 unifyMatch match other = do
   vs <- looks solverVars
+  holes <- looks typeDictVars
   -- Bind to fresh types and then unify, in order to avoid occurs check when
   -- trying to unify two matches with each other.
   case match of
@@ -541,13 +588,14 @@ unifyMatch match other = do
       innerTy <- freshType =<< freshType TyKind
       bindQ v $ Con $ NewtypeCon wrapTy innerTy
       unify innerTy other
-    MatchPairFst (Con (ClassDictHole _)) ->
-      throw TypeErr "Unification with class dict holes not implemented"
-    MatchPairSnd (Con (ClassDictHole _)) ->
-      throw TypeErr "Unification with class dict holes not implemented"
     MatchNewtype _ (Con (ClassDictHole _)) ->
       throw TypeErr "Unification with class dict holes not implemented"
-    _ -> throw TypeErr "Can't reduce match expression!"
+    MatchNewtype _ (Var v) | v `isin` holes ->
+      -- Can't resolve this now. Save it for later, once we have resolved
+      -- type dict holes. (Put the match first so that it is the "expected"
+      -- type, for clearer error message.)
+      extend $ mempty { deferredUnifies = [(Match match, other)] }
+    _ -> throw TypeErr $ "Can't reduce match expression: " <> pprint match
 
 unifyEff :: EffectRow -> EffectRow -> UInferM ()
 unifyEff r1 r2 = do
@@ -598,10 +646,10 @@ renameForPrinting x = (scopelessSubst substEnv x, newNames)
 instance Semigroup SolverEnv where
   -- TODO: as an optimization, don't do the subst when sub2 is empty
   -- TODO: make concatenation more efficient by maintaining a reverse-lookup map
-  SolverEnv scope1 sub1 <> SolverEnv scope2 sub2 =
-    SolverEnv (scope1 <> scope2) (sub1' <> sub2)
+  SolverEnv scope1 dict1 sub1 def1 <> SolverEnv scope2 dict2 sub2 def2 =
+    SolverEnv (scope1 <> scope2) (dict1 <> dict2) (sub1' <> sub2) (def1 <> def2)
     where sub1' = fmap (scopelessSubst sub2) sub1
 
 instance Monoid SolverEnv where
-  mempty = SolverEnv mempty mempty
+  mempty = SolverEnv mempty mempty mempty mempty
   mappend = (<>)

@@ -17,15 +17,124 @@ def Bar (a: Type) -> (witness:Foo a) ?=> : Type = FromFoo witness
 
 %passes typed
 def BazExplicit (a: Type) -> (witness:Foo a) -> (b:(FromFoo witness)) : FromFoo witness = b
+> === typed ===
+> Module (Typed)
+>   unevaluated decls:
+>   BazExplicit:(a1:Type->(witness:Foo a1->((MatchNewtype Type witness)->(MatchNewtype Type witness)))) = \a1:Type. \witness:Foo a1. \b:(MatchNewtype Type witness). b
+>
+>   evaluated bindings:
+>   ()
 
 :t BazExplicit
+> (a1:Type->(witness:Foo a1->((MatchNewtype Type witness)->(MatchNewtype Type witness))))
 
 %passes typed
 :p BazExplicit (Fin 3) (MkFoo (Fin 2)) (1@(Fin 2))
+> === typed ===
+> Module (Typed)
+>   unevaluated decls:
+>   tmp:Type = (Fin) (3)
+>   tmp1:(witness:Foo (Fin 3)->((MatchNewtype Type witness)->(MatchNewtype Type witness))) = (BazExplicit) ((Fin 3))
+>   tmp2:(Type->Foo (Fin 3)) = (MkFoo) ((Fin 3))
+>   tmp3:Type = (Fin) (2)
+>   tmp4:Foo (Fin 3) = (tmp2) (tmp3)
+>   tmp5:((Fin 2)->(Fin 2)) = (tmp1) ((Foo (Fin 3) (Fin 2)))
+>   tmp6:(n:Type->n) = ((@)) (1)
+>   tmp7:Type = (Fin) (2)
+>   tmp8:(Fin 2) = (tmp6) ((Fin 2))
+>   tmp9:(Fin 2) = (tmp5) (tmp8)
+>   _ans_:(Fin 2) = tmp9
+>
+>   evaluated bindings:
+>   ()
+> 1@(Fin 2)
 
 
 def Baz (a: Type) -> (witness:Foo a) ?=> (b:(FromFoo witness)) : FromFoo witness = b
 
-%passes
+%passes typed
 :p Baz (Fin 3) (1@(Fin 2))
+> === typed ===
+> Module (Typed)
+>   unevaluated decls:
+>   tmp:Type = (Fin) (3)
+>   tmp1:(witness:Foo (Fin 3)?=>((MatchNewtype Type witness)->(MatchNewtype Type witness))) = (Baz) ((Fin 3))
+>   tmp2:((Fin 2)->(Fin 2)) = (tmp1) ((Foo (Fin 3) (Fin 2)))
+>   tmp3:(n:Type->n) = ((@)) (1)
+>   tmp4:Type = (Fin) (2)
+>   tmp5:(Fin 2) = (tmp3) ((Fin 2))
+>   tmp6:(Fin 2) = (tmp2) (tmp5)
+>   _ans_:(Fin 2) = tmp6
+>
+>   evaluated bindings:
+>   ()
+> 1@(Fin 2)
 
+
+'Newtype as a newtype!
+The idea here is to construct a newtype that represents a type family, which
+tells you how to unwrap other newtypes. By doing class dictionary synthesis
+during inference, we can do this in a type-safe way.
+
+@newtype
+def IsNewtype (a: Type) : Type = Type
+def mkIsNewtype (nt: Type)?-> (a: Type) : IsNewtype nt = unsafeNewtypeCon a
+def Unwrap (nt:Type)?-> (d:IsNewtype nt) : Type = unsafeFromNewtypeCon d
+
+def toNewtype
+  (nt : Type) ->
+  (inst : IsNewtype nt) ?=>
+  (a : Unwrap inst) : nt = unsafeNewtypeCon a
+
+def fromNewtype
+  (nt : Type) ?->
+  (inst : IsNewtype nt) ?=>
+  (a : nt) : Unwrap inst = unsafeFromNewtypeCon a
+
+'We can then use this wonderfully self-referential instance:
+
+@instance
+def isNewtype_IsNewtype (a:Type)?-> : IsNewtype (IsNewtype a) = mkIsNewtype Type
+
+'... and then use it to define another instance, with type safety!
+
+@newtype MyInt : Type = Int
+@newtype MyReal : Type = Real
+
+-- (eventually the compiler could derive these automatically)
+@instance isNewtype_MyInt : IsNewtype MyInt = toNewtype _ Int
+@instance isNewtype_MyReal : IsNewtype MyReal = toNewtype _ Real
+
+:t toNewtype
+> (nt1:Type->(inst:IsNewtype nt1?=>((MatchNewtype Type inst)->nt1)))
+
+:p toNewtype MyInt 3
+> (MyInt 3)
+
+:p toNewtype MyInt 3.0
+> Type error:
+> Expected: Int
+>   Actual: Real
+
+:p toNewtype MyReal 3.0
+> 3.0
+
+:t toNewtype MyReal
+> (Real->MyReal)
+
+:t
+  x = toNewtype MyInt 3
+  fromNewtype x
+> Int
+
+:p fromNewtype 3
+> Type error:Couldn't synthesize a class dictionary for: IsNewtype Int
+
+
+'Caveats:
+- My current implementation requires typeclass instances to reduce to atoms,
+  which makes sense for type families but is too restrictive in general.
+- The current solver strategy is naive, and there are probably edge cases that
+  require an iterative approach (alternating between solving newtype dicts and
+  unifying types).
+- General hackiness in the implementation.
