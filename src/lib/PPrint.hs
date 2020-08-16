@@ -140,6 +140,8 @@ instance PrettyPrec Expr where
     atPrec AppPrec $ pApp f <+> pArg x
   prettyPrec (Atom x ) = prettyPrec x
   prettyPrec (Op  op ) = prettyPrec op
+  prettyPrec (Hof (For dir (Lam lamExpr))) =
+    atPrec LowestPrec $ dirStr dir <+> prettyLamHelper lamExpr (PrettyFor dir)
   prettyPrec (Hof hof) = prettyPrec hof
   prettyPrec (Case e alts _) = atPrec LowestPrec $ "case" <+> p e <+> "of" <>
     nest 2 (hardline <> foldMap (\alt -> prettyAlt alt <> hardline) alts)
@@ -264,14 +266,49 @@ instance Pretty Decl where
     Let _  b  rhs -> align $ p b  <+> "=" <> (nest 2 $ group $ line <> pLowest rhs)
     Unpack bs rhs -> align $ p (toList bs) <+> "=" <> (nest 2 $ group $ line <> pLowest rhs)
 
+prettyPiTypeHelper :: PiType -> Doc ann
+prettyPiTypeHelper (Abs binder (arr, body)) = let
+  prettyBinder = case binder of
+    Ignore a -> pArg a
+    _ -> parens $ p binder
+  prettyBody = case body of
+    Pi subpi -> prettyPiTypeHelper subpi
+    _ -> pLowest body
+  in prettyBinder <> (group $ line <> p arr <+> prettyBody)
+
+data PrettyLamType = PrettyLam | PrettyFor Direction deriving (Eq)
+
+prettyLamHelper :: LamExpr -> PrettyLamType -> Doc ann
+prettyLamHelper lamExpr lamType = let
+  arrowOk arr' = case lamType of
+    PrettyLam -> arr' /= TabArrow
+    PrettyFor Fwd -> arr' == TabArrow
+    _ -> False
+  rec :: LamExpr -> Bool -> (Doc ann, Block)
+  rec (Abs binder (_, body')) first =
+    let thisOne = (if first then "" else line) <> p binder
+    in case body' of
+      Block Empty (Atom (Lam next@(Abs _ (arr', _)))) | arrowOk arr' ->
+        let (binders', block) = rec next False
+        in (thisOne <> binders', block)
+      Block Empty (Hof (For dir (Lam next))) | lamType == PrettyFor dir ->
+        let (binders', block) = rec next False
+        in (thisOne <> binders', block)
+      _ -> (thisOne <> ".", body')
+  (binders, body) = rec lamExpr True
+  in align (group $ nest 4 $ binders) <> (group $ nest 2 $ p body)
+
 instance Pretty Atom where pretty = prettyFromPrettyPrec
 instance PrettyPrec Atom where
   prettyPrec atom = case atom of
     Var (x:>_)  -> atPrec ArgPrec $ p x
-    Lam (Abs b (TabArrow, body))   -> atPrec LowestPrec $ align $ nest 2 $ "for " <> p b <> "." <+> p body
-    Lam (Abs b (_, body)) -> atPrec LowestPrec $ align $ nest 2 $ "\\" <> p b <> "." <+> p body
-    Pi  (Abs (Ignore a) (arr, b)) -> atPrec LowestPrec $ pArg a <+> p arr <+> pLowest b
-    Pi  (Abs a           (arr, b)) -> atPrec LowestPrec $ parens (p a) <+> p arr <+> pLowest b
+    Lam lamExpr@(Abs _ (TabArrow, _)) ->
+      atPrec LowestPrec $ "for"
+      <+> prettyLamHelper lamExpr (PrettyFor Fwd)
+    Lam lamExpr ->
+      atPrec LowestPrec $ "\\"
+      <> prettyLamHelper lamExpr PrettyLam
+    Pi piType -> atPrec LowestPrec $ align $ prettyPiTypeHelper piType
     TC  e -> prettyPrec e
     Con e -> prettyPrec e
     Eff e -> atPrec ArgPrec $ p e
