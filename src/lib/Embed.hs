@@ -16,7 +16,7 @@ module Embed (emit, emitTo, emitAnn, emitOp, buildDepEffLam, buildLamAux, buildP
               runSubstEmbed, runEmbed, zeroAt, addAt, sumAt, getScope, reduceBlock,
               app, add, mul, sub, neg, div', iadd, imul, isub, idiv, reduceScoped,
               select, substEmbed, substEmbedR, emitUnpack, getUnpacked,
-              fromPair, getFst, getSnd, naryApp, appReduce,
+              fromPair, getFst, getSnd, getPair, naryApp, appReduce,
               emitBlock, unzipTab, buildFor, isSingletonType, emitDecl, withNameHint,
               singletonTypeVal, scopedDecls, embedScoped, extendScope, checkEmbed,
               embedExtend, reduceAtom,
@@ -273,6 +273,9 @@ getFst p = emitOp $ Fst p
 getSnd :: MonadEmbed m => Atom -> m Atom
 getSnd (PairVal _ y) = return y
 getSnd p = emitOp $ Snd p
+
+getPair :: MonadEmbed m => Atom -> m (Atom, Atom)
+getPair p = (,) <$> getFst p <*> getSnd p
 
 getUnpacked :: MonadEmbed m => Atom -> m [Atom]
 getUnpacked (DataCon _ _ _ xs) = return xs

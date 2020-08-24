@@ -1,0 +1,9 @@
+
+:t astype (IsoLens {foo:Int & bar:Float} _ _) #foo
+> (IsoLens {bar: Float32 & foo: Int32} Int32 {bar: Float32})
+
+:t astype (IsoLens {foo:{a:Int} & bar:{baz:Float & qux:Unit}} _ _) #{foo & bar:#baz}
+> (IsoLens
+>    {bar: {baz: Float32 & qux: Unit} & foo: {a: Int32}}
+>    {bar: Float32 & foo: {a: Int32}}
+>    {bar: {qux: Unit}})

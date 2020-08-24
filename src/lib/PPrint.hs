@@ -20,6 +20,7 @@ import Data.Foldable (toList)
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as M
 import qualified Data.ByteString.Lazy.Char8 as B
+import Data.Maybe (fromMaybe)
 import Data.String (fromString)
 import Data.Text.Prettyprint.Doc.Render.Text
 import Data.Text.Prettyprint.Doc
@@ -543,6 +544,7 @@ instance PrettyPrec UExpr' where
     UIntLit  v -> atPrec ArgPrec $ p v
     UCharLit v -> atPrec ArgPrec $ p v
     UFloatLit v -> atPrec ArgPrec $ p v
+    USugar sugar -> prettyPrec sugar
 
 instance Pretty UAlt where
   pretty (UAlt pat body) = p pat <+> "->" <+> p body
@@ -580,6 +582,23 @@ prettyUBinder (pat, ann) = p pat <> annDoc where
   annDoc = case ann of
     Just ty -> ":" <> pApp ty
     Nothing -> mempty
+
+instance Pretty USugar where pretty = prettyFromPrettyPrec
+instance PrettyPrec USugar where
+  prettyPrec sugar = case sugar of
+    ULensRecordField field -> atPrec ArgPrec $ "#" <> p field
+    ULensRecord items -> atPrec ArgPrec $ "#" <>
+      prettyExtLabeledItems (wrap items) (line <> "&") ":" ArgPrec
+    UPrismVariantField field -> atPrec ArgPrec $ "#!" <> p field
+    UPrismRecord items -> atPrec ArgPrec $ "#!" <>
+      prettyExtLabeledItems items (line' <> ",") " =" ArgPrec
+    UPrismVariant items -> atPrec ArgPrec $ "#!" <>
+      prettyExtLabeledItems (wrap items) (line <> "|") ":" ArgPrec
+    where
+      wrap :: ExtLabeledItems (Maybe UExpr) UExpr
+           -> ExtLabeledItems UExpr UExpr
+      wrap (Ext items rest) =
+        Ext (fmap (fromMaybe (WithSrc (-1, -1) UHole)) items) rest
 
 spaced :: (Foldable f, Pretty a) => f a -> Doc ann
 spaced xs = hsep $ map p $ toList xs

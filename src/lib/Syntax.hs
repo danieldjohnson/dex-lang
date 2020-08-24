@@ -23,6 +23,7 @@ module Syntax (
     IPrimOp, IVar, IBinder, IType (..), ArrayType, SetVal (..), MonMap (..), LitProg,
     UAlt (..), Alt, binderBinding, Label, LabeledItems (..), labeledSingleton,
     reflectLabels, withLabels, ExtLabeledItems (..), prefixExtLabeledItems,
+    popLabeled,
     MDImpFunction (..), MDImpProgram, MDImpInstr (..), MDImpStatement,
     ImpKernel (..), CUDAKernel (..), IScope,
     ScalarTableType, ScalarTableBinder, BinderInfo (..),Bindings,
@@ -33,7 +34,7 @@ module Syntax (
     freeVars, freeUVars, Subst, HasVars, BindsVars,
     strToName, nameToStr, showPrimName,
     monMapSingle, monMapLookup, Direction (..), ArrayRef, Array, Limit (..),
-    UExpr, UExpr' (..), UType, UPatAnn, UAnnBinder, UVar,
+    UExpr, UExpr' (..), UType, UPatAnn, UAnnBinder, UVar, USugar (..),
     UPat, UPat' (..), UModule (..), UDecl (..), UArrow, arrowEff,
     DataDef (..), DataConDef (..), UConDef (..), Nest (..), toNest,
     subst, deShadow, scopelessSubst, absArgType, applyAbs, makeAbs,
@@ -182,6 +183,12 @@ withLabels :: LabeledItems a -> LabeledItems (Label, Int, a)
 withLabels (LabeledItems items) = LabeledItems $
   flip M.mapWithKey items $ \k xs -> fmap (\(i,a) -> (k,i,a)) (enumerate xs)
 
+popLabeled :: Label -> LabeledItems a -> Maybe (a, LabeledItems a)
+popLabeled label (LabeledItems items) = do
+  v NE.:| vs <- M.lookup label items
+  let rhs = M.update (const $ NE.nonEmpty vs) label items
+  return (v, LabeledItems rhs)
+
 instance Semigroup (LabeledItems a) where
   LabeledItems items <> LabeledItems items' =
     LabeledItems $ M.unionWith (<>) items items'
@@ -220,6 +227,7 @@ data UExpr' = UVar UVar
             | UIntLit  Int
             | UCharLit Char
             | UFloatLit Double
+            | USugar USugar
               deriving (Show, Generic)
 
 data UConDef = UConDef Name (Nest UAnnBinder)  deriving (Show, Generic)
@@ -249,6 +257,15 @@ data UPat' = UPatBinder UBinder
            | UPatVariant (LabeledItems ()) Label UPat   -- {|a|b| a=x |}
            | UPatVariantLift (LabeledItems ()) UPat     -- {|a|b| ...rest |}
              deriving (Show)
+
+-- Syntactic sugar; expanded during inference.
+data USugar
+  = ULensRecordField Label                              -- #a
+  | ULensRecord (ExtLabeledItems (Maybe UExpr) UExpr)   -- #{a, b:y, ...c}
+  | UPrismVariantField Label                            -- #!a
+  | UPrismRecord (ExtLabeledItems UExpr UExpr)          -- #!{a=x, b=y, ...c}
+  | UPrismVariant (ExtLabeledItems (Maybe UExpr) UExpr) -- #!{a, b:y, ...c}
+  deriving (Show, Generic)
 
 data WithSrc a = WithSrc SrcPos a
                  deriving (Show, Functor, Foldable, Traversable)
@@ -681,6 +698,7 @@ instance HasUVars UExpr' where
     UIntLit  _ -> mempty
     UCharLit _ -> mempty
     UFloatLit _ -> mempty
+    USugar optic -> freeUVars optic
 
 instance HasUVars UAlt where
   freeUVars (UAlt p body) = freeUVars $ Abs p body
@@ -707,6 +725,14 @@ instance BindsUVars UPat' where
     UPatRecord items -> boundUVars items
     UPatVariant _ _ p -> boundUVars p
     UPatVariantLift _ p -> boundUVars p
+
+instance HasUVars USugar where
+  freeUVars sugar = case sugar of
+    ULensRecordField _ -> mempty
+    ULensRecord items -> freeUVars items
+    UPrismVariantField _ -> mempty
+    UPrismRecord items -> freeUVars items
+    UPrismVariant items -> freeUVars items
 
 instance HasUVars UDecl where
   freeUVars (ULet _ p expr) = freeUVars p <> freeUVars expr
@@ -744,7 +770,7 @@ instance HasUVars EffectRow where
 instance HasUVars a => HasUVars (LabeledItems a) where
   freeUVars (LabeledItems items) = foldMap freeUVars items
 
-instance HasUVars a => HasUVars (ExtLabeledItems a a) where
+instance (HasUVars a, HasUVars b) => HasUVars (ExtLabeledItems a b) where
   freeUVars (Ext items rest) = freeUVars items <> freeUVars rest
 
 instance HasUVars eff => HasUVars (ArrowP eff) where

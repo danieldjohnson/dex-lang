@@ -19,6 +19,8 @@ Float32 = %Float32
 Int = Int32
 Float = Float32
 
+def astype (t:Type) (x:t) : t = x  -- to give hints to type inference
+
 def internalCast (b:Type) (x:a) : b = %cast b x
 
 def F64ToF (x : Float64) : Float   = internalCast _ x
@@ -581,3 +583,48 @@ def (<>) (x:List a) (y:List a) : List a =
     case i' < nx of
       True  -> xs.(fromOrdinal _ i')
       False -> ys.(fromOrdinal _ (i' - nx))
+
+'Optics
+
+'Note: many of the below names are referred to directly during desugaring.
+
+data IsoLens full:Type focus:Type ignore:Type =
+  MkIsoLens { split: full -> (focus & ignore)
+            & build: (focus & ignore) -> full
+            }
+
+data IsoPrism full:Type focus:Type alt:Type =
+  MkIsoPrism { split: full -> (focus | alt)
+             & build: (focus | alt) -> full
+             }
+
+def otherThan (lens: IsoLens full a b) : IsoLens full b a =
+  (MkIsoLens {split=origSplit, build=origBuild}) = lens
+  split = \x.
+    (a, b) = origSplit x
+    (b, a)
+  build = \(b, a). origBuild (a, b)
+  MkIsoLens {split, build}
+
+lensAll : IsoLens full full {&} =
+  MkIsoLens {split = \x. (x, {}), build = fst}
+
+lensNone : IsoLens full {&} full = otherThan lensAll
+
+def exclude (prism: IsoPrism full a b) : IsoPrism full b a =
+  (MkIsoPrism {split=origSplit, build=origBuild}) = prism
+  split = \x. case origSplit x of
+    Left a -> Right a
+    Right b -> Left b
+  build = \x. origBuild $ case x of
+    Left b -> Right b
+    Right a -> Left a
+  MkIsoPrism {split, build}
+
+prismAll : IsoPrism full full {|} =
+  split = Left
+  build = \x. case x of Left a -> a
+  MkIsoPrism {split, build}
+
+prismNone : IsoPrism full {|} full = exclude prismAll
+

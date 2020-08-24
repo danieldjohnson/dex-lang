@@ -18,7 +18,9 @@ import Data.Functor
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as M
 import Data.String (fromString)
+import Data.Text (Text)
 import Data.Text.Prettyprint.Doc
+import Debug.Trace
 
 import Syntax
 import Embed  hiding (sub)
@@ -254,6 +256,9 @@ checkOrInferRho (WithSrc pos expr) reqTy =
   UFloatLit x -> matchRequirement $ Con $ Lit  $ Float32Lit $ realToFrac x
   -- TODO: Make sure that this conversion is not lossy!
   UCharLit x  -> matchRequirement $ CharLit $ fromIntegral $ fromEnum x
+  USugar sugar -> do
+    -- sugar' <- mapM inferRho sugar
+    matchRequirement =<< desugar sugar
   where
     matchRequirement :: Atom -> UInferM Atom
     matchRequirement x = return x <*
@@ -623,6 +628,293 @@ addSrcPos pos m = do
 
 getSrcCtx :: UInferM SrcCtx
 getSrcCtx = lift ask
+
+-- === desugaring ===
+
+-- Fallback for optional expressions.
+inferOrUseGlobal :: Tag -> Maybe UExpr -> UInferM Atom
+inferOrUseGlobal name Nothing =
+  instantiateSigma =<< lookupSourceVar (GlobalName name:>())
+inferOrUseGlobal _ (Just item) = inferRho item
+
+-- Unpack a lens or prism, constraining it to be correct.
+unpackOptic :: Text -> Atom -> UInferM (Atom -> UInferM Atom, Atom -> UInferM Atom)
+unpackOptic opticName optic = do
+  TypeCon opticDef [] <- lookupSourceVar (GlobalName opticName :>())
+  params <- replicateM 3 (freshType TyKind)
+  constrainEq (getType optic) (TypeCon opticDef params)
+  [arg] <- getUnpacked =<< zonk optic
+  [build, split] <- getUnpacked arg
+  return (\v -> emit $ App split v, \v -> emit $ App build v)
+
+-- Extract specific fields from a record.
+getRecordFields :: LabeledItems a -> Atom -> UInferM (LabeledItems Atom, Atom)
+getRecordFields wanted record = do
+  wantedTypes <- mapM (const $ freshType TyKind) wanted
+  rest <- freshInferenceName LabeledRowKind
+  constrainEq (getType record) (RecordTy $ Ext wantedTypes $ Just rest)
+  record' <- zonk record
+  [l, r] <- getUnpacked =<< emit (Op $ RecordSplit wantedTypes record')
+  ls <- getUnpacked l
+  return (restructure ls wanted, r)
+
+recordCons :: LabeledItems Atom -> Atom -> UInferM Atom
+recordCons fields rest = do
+  row <- freshInferenceName LabeledRowKind
+  constrainEq (getType rest) (RecordTy $ Ext NoLabeledItems $ Just row)
+  emitOp . RecordCons fields =<< zonk rest
+
+-- Make a lens. split maps the original atom to a pair, and build maps the
+-- components back to the original.
+makeLens :: (Atom -> UInferM (Atom, Atom))
+          -> (Atom -> Atom -> UInferM Atom) -> UInferM Atom
+makeLens split build = do
+  [full, focus, ignore] <- replicateM 3 $ freshType TyKind
+  let outTy = PairTy focus ignore
+  split'@(Lam (Abs _ (_, splitBody))) <- buildLam (Ignore full) PureArrow $
+    \atom -> do {(l, r) <- split atom; return $ Con $ PairCon l r}
+  build'@(Lam (Abs _ (_, buildBody))) <- buildLam (Ignore outTy) PureArrow $
+    \atom -> do {(l, r) <- getPair atom; build l r}
+  constrainEq (getType splitBody) outTy
+  constrainEq (getType buildBody) full
+  (def, con) <- lookupDataCon (GlobalName "MkIsoLens")
+  return $ DataCon def [full, focus, ignore] con [
+    Record $ labeledSingleton "split" split'
+          <> labeledSingleton "build" build']
+
+makeLeft :: Atom -> UInferM Atom
+makeLeft x = do
+  rty <- freshType TyKind
+  DataCon eitherDef _ i _ <- lookupSourceVar (GlobalName "Left" :>())
+  return $ DataCon eitherDef [getType x, rty] i [x]
+
+makeRight :: Atom -> UInferM Atom
+makeRight x = do
+  lty <- freshType TyKind
+  DataCon eitherDef _ i _ <- lookupSourceVar (GlobalName "Right" :>())
+  return $ DataCon eitherDef [lty, getType x] i [x]
+
+makeVariant :: LabeledItems a -> Label -> Atom -> UInferM Atom
+makeVariant skip label atom = do
+  rest <- freshInferenceName LabeledRowKind
+  prefix <- mapM (const $ freshType TyKind) skip
+  let known = prefix <> (labeledSingleton label $ getType atom)
+  return $ Variant (Ext known $ Just rest) label 0 atom
+
+liftVariant :: LabeledItems a -> Atom -> UInferM Atom
+liftVariant skip atom = do
+  prefix <- mapM (const $ freshType TyKind) skip
+  emitOp $ VariantLift prefix atom
+
+constrainedAs :: Type -> Atom -> UInferM Atom
+constrainedAs ty atom = constrainEq (getType atom) ty *> return atom
+
+-- Match on a Dex (a | b) with a Haskell function.
+matchEither :: (Either Atom Atom -> UInferM Atom)
+            -> (Atom -> UInferM Atom)
+matchEither fn atom = do
+  [lty, rty, resultTy] <- replicateM 3 $ freshType TyKind
+  TypeCon eitherDef [] <- lookupSourceVar (GlobalName "(|)" :>())
+  constrainEq (getType atom) (TypeCon eitherDef [lty, rty])
+  leftAlt <- buildNAbs (toNest [Ignore lty]) $
+    \[l] -> constrainedAs resultTy =<< fn (Left l)
+  rightAlt <- buildNAbs (toNest [Ignore rty]) $
+    \[r] -> constrainedAs resultTy =<< fn (Right r)
+  emit $ Case atom [leftAlt, rightAlt] resultTy
+
+-- Match on a Dex variant with a LabeledItems of cases and a fallback.
+matchVariantFields :: LabeledItems (Atom -> UInferM Atom)
+                   -> (Atom -> UInferM Atom) -> Atom -> UInferM Atom
+matchVariantFields matchers fallback variant = do
+  matchedTypes <- mapM (const $ freshType TyKind) matchers
+  rest <- freshInferenceName LabeledRowKind
+  constrainEq (getType variant) (VariantTy $ Ext matchedTypes $ Just rest)
+  variant' <- zonk variant
+  variant'' <- emit $ Op $ VariantSplit matchedTypes variant'
+  resultTy <- freshType TyKind
+  alts <- flip mapM (zip (toList matchers) (toList matchedTypes)) $
+    \(fn, vty) -> buildNAbs (toNest [Ignore vty]) $
+      \[v] -> constrainedAs resultTy =<< fn v
+  knownAlt <- buildNAbs
+    (toNest [Ignore $ VariantTy $ Ext matchedTypes Nothing]) $
+    \[v] -> emit $ Case v alts resultTy
+  fallbackAlt <- buildNAbs
+    (toNest [Ignore $ VariantTy $ Ext NoLabeledItems $ Just rest]) $
+    \[v] -> constrainedAs resultTy =<< fallback v
+  emit $ Case variant'' [knownAlt, fallbackAlt] resultTy
+
+makePrism :: (Atom -> UInferM Atom)
+          -> (Atom -> UInferM Atom) -> UInferM Atom
+makePrism split build = do
+  [full, focus, ignore] <- replicateM 3 $ freshType TyKind
+  TypeCon eitherDef [] <- lookupSourceVar (GlobalName "(|)" :>())
+  let outTy = TypeCon eitherDef [focus, ignore]
+  split'@(Lam (Abs _ (_, splitBody))) <- buildLam (Ignore full) PureArrow split
+  build'@(Lam (Abs _ (_, buildBody))) <- buildLam (Ignore outTy) PureArrow build
+  constrainEq (getType splitBody) outTy
+  constrainEq (getType buildBody) full
+  (def, con) <- lookupDataCon (GlobalName "MkIsoPrism")
+  return $ DataCon def [full, focus, ignore] con [
+    Record $ labeledSingleton "split" split'
+          <> labeledSingleton "build" build']
+
+desugar :: USugar -> UInferM Atom
+desugar sugar = case sugar of
+    -- #foo desugars to
+    -- MkIsoLens {split=\{foo, ...r}. (foo, r), build=\(foo,r). {foo, ...r}}
+    ULensRecordField label -> let
+      split atom = do
+        (l, r) <- getRecordFields (labeledSingleton label ()) atom
+        Just (l', NoLabeledItems) <- return $ popLabeled label l
+        return (l', r)
+      build left right =
+        recordCons (labeledSingleton label left) right
+      in makeLens split build
+    -- {foo & bar:barLens & ...restLens} desugars to
+    -- MkIsoLens { split=\{foo, bar, ...r}. ( { foo
+    --                                        , bar=fst $ splitLens barLens bar
+    --                                        , ...(fst $ splitLens restLens r)}
+    --                                      , { bar=snd $ splitLens barLens bar
+    --                                        , ...(snd $ splitLens restLens r)}
+    --             build=\({foo, bar=barL, ...rL}, {bar=barR, ...rR}).
+    --                        {foo, bar=buildLens barLens (barL, barR),
+    --                         ...(buildLens restLens (rL, rR))}
+    --           }
+    ULensRecord (Ext lenses restLens) -> do
+      restLens' <- inferOrUseGlobal "lensNone" restLens
+      (restSplit, restBuild) <- unpackOptic "IsoLens" restLens'
+      let step (ignoreFields, splitter, builder) (label, _, lens) =
+            case lens of
+              Just lens' -> do
+                -- {foo:fooLens & ...} case: split with the provided optic.
+                (lensSplit, lensBuild) <- unpackOptic "IsoLens" =<< inferRho lens'
+                let splitter' atoms = do
+                        Just (v, vs) <- return $ popLabeled label atoms
+                        (l, r) <- getPair =<< lensSplit v
+                        (ls, rs) <- splitter vs
+                        return $ ( labeledSingleton label l <> ls
+                                 , labeledSingleton label r <> rs)
+                    builder' left right = do
+                        Just (l, ls) <- return $ popLabeled label left
+                        Just (r, rs) <- return $ popLabeled label right
+                        v <- lensBuild $ Con $ PairCon l r
+                        vs <- builder ls rs
+                        return $ labeledSingleton label v <> vs
+                return ( labeledSingleton label () <> ignoreFields
+                       , splitter'
+                       , builder')
+              -- {foo & ...} case: put entire axis into the focus.
+              Nothing -> return (ignoreFields, splitter', builder') where
+                splitter' atoms = do
+                  Just (v, vs) <- return $ popLabeled label atoms
+                  (fs, is) <- splitter vs
+                  return (labeledSingleton label v <> fs, is)   
+                builder' left right = do
+                  Just (l, ls) <- return $ popLabeled label left
+                  vs <- builder ls right
+                  return $ labeledSingleton label l <> vs
+      -- Fold over the fields in reverse order (so we can push and pop).
+      (ignoreFields, splitter, builder) <- foldM step
+        ( NoLabeledItems
+        , const $ return (NoLabeledItems, NoLabeledItems)
+        , const $ const $ return NoLabeledItems)
+        (reverse $ toList $ withLabels lenses)
+      let split atom = do
+            (known, rest) <- getRecordFields lenses atom
+            (fs, is) <- splitter known
+            (fr, ir) <- getPair =<< restSplit rest
+            left <- recordCons fs fr
+            right <- recordCons is ir
+            return (left, right)
+      let build left right = do
+            (fs, fr) <- getRecordFields lenses left
+            (is, ir) <- getRecordFields ignoreFields right
+            known <- builder fs is
+            rest <- restBuild $ Con $ PairCon fr ir
+            recordCons known rest
+      makeLens split build
+    -- #!foo desugars to
+    -- MkIsoPrism { split=\v. case v of {|foo=x|}    -> Left x
+    --                                  {|foo|...y|} -> Right y
+    --            , build=\v. case v of Left x  -> {|foo=x|}
+    --                                  Right y -> {|foo|...y|} }
+    UPrismVariantField label -> let
+      split = matchVariantFields (labeledSingleton label makeLeft) makeRight 
+      build = matchEither $ \case
+        Left v -> makeVariant NoLabeledItems label v
+        Right v -> liftVariant (labeledSingleton label ()) v
+      in makePrism split build
+    -- #!{foo | bar:barPrism | ...restPrism} desugars to something like
+    -- MkIsoPrism { split=\v. case v of
+    --                 {|foo=x|} -> Left {|foo=x|}
+    --                 {|bar=x|} -> case splitPrism barPrism x of
+    --                                 Left y  -> Left  {|bar=y|}
+    --                                 Right y -> Right {|bar=y|}
+    --                 {|foo|bar|...x|} -> case splitPrism restPrism x of
+    --                                 Left y  -> Left  {|foo|bar|...y|}
+    --                                 Right y -> Right {|foo|bar|...y|}
+    --            , build=\v. case v of
+    --                 Left {|foo=x|} -> {|foo=x|}
+    --                 Left {|bar=x|} -> {|bar=buildPrism barPrism $ Left x |}
+    --                 Left {|foo|bar|...x|} ->
+    --                   {|foo|bar|...buildPrism barPrism $ Left x|}
+    --                 Right {|bar=x|} -> {|bar=buildPrism barPrism $ Right x |}
+    --                 Right {|foo|bar|...x|} ->
+    --                   {|foo|bar|...buildPrism barPrism $ Right x|}
+    --            }
+    UPrismVariant (Ext prisms restPrism) -> do
+      restPrism' <- inferOrUseGlobal "prismNone" restPrism
+      (restSplit, restBuild) <- unpackOptic "IsoPrism" restPrism'
+      let step (splitters, leftBuilders, rightBuilders) (label, _, prism) =
+            case prism of
+              Just prism' -> do
+                -- {foo:fooPrism | ...} case: split with the provided optic.
+                (prismSplit, prismBuild) <-
+                    unpackOptic "IsoPrism" =<< inferRho prism'
+                let
+                  -- Note: the labels in leftBuilders/rightBuilders are the ones
+                  -- we need to lift over when splitting something to the
+                  -- left/right; conversely the labels in splitters are the ones
+                  -- we need to lift over when building something.
+                  splitter = labeledSingleton label $ \v -> do
+                    v' <- prismSplit v
+                    flip matchEither v' $ \case
+                      Left l  -> makeLeft  =<< makeVariant leftBuilders label l
+                      Right r -> makeRight =<< makeVariant rightBuilders label r
+                  leftBuilder = labeledSingleton label $ \l ->
+                    makeVariant splitters label =<< prismBuild =<< makeLeft l
+                  rightBuilder = labeledSingleton label $ \r -> do
+                    makeVariant splitters label =<< prismBuild =<< makeRight r
+                return ( splitters <> splitter
+                       , leftBuilders <> leftBuilder
+                       , rightBuilders <> rightBuilder)
+              -- {foo | ...} case: put entire slice into the focus.
+              Nothing -> let
+                splitter = labeledSingleton label $ \v ->
+                  makeLeft =<< makeVariant leftBuilders label v
+                leftBuilder = labeledSingleton label $ \l ->
+                  makeVariant splitters label l
+                in return ( splitters <> splitter
+                          , leftBuilders <> leftBuilder
+                          , rightBuilders)
+      -- Fold over the fields in forward order (so we know what fields to skip).
+      (splitters, leftBuilders, rightBuilders) <- foldM step
+        (NoLabeledItems, NoLabeledItems, NoLabeledItems)
+        (toList $ withLabels prisms)
+      let split = matchVariantFields splitters $ \v -> do
+            v' <- restSplit v
+            flip matchEither v' $ \case
+              Left l -> makeLeft =<< liftVariant leftBuilders l
+              Right r -> makeRight =<< liftVariant rightBuilders r
+      let build = matchEither $ \case
+            Left l -> matchVariantFields leftBuilders
+              (\v -> liftVariant splitters =<< restBuild =<< makeLeft v) l
+            Right r -> matchVariantFields rightBuilders
+              (\v -> liftVariant splitters =<< restBuild =<< makeRight v) r
+      makePrism split build
+    -- TODO: record prisms
+    UPrismRecord _ -> do
+      throw NotImplementedErr "!"
 
 -- === typeclass dictionary synthesizer ===
 

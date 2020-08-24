@@ -195,6 +195,7 @@ leafExpr = parens (mayPair $ makeExprParser leafExpr ops)
          <|> uPrim
          <|> unitCon
          <|> (uLabeledExprs `fallBackTo` uVariantExpr)
+         <|> uSugar
          <?> "expression"
 
 containedExpr :: Parser UExpr
@@ -448,7 +449,7 @@ leafPat =
   where pun pos l = WithSrc pos $ UPatBinder $ Bind (mkName l:>())
         def pos = WithSrc pos $ UPatBinder $ Ignore ()
         variantPat = parseVariant leafPat UPatVariant UPatVariantLift
-        recordPat = UPatRecord <$> parseLabeledItems "," "=" leafPat
+        recordPat = UPatRecord <$> parseLabeledItems "," "=" leafPat leafPat
                                                      (Just pun) (Just def)
 
 -- TODO: add user-defined patterns
@@ -499,16 +500,30 @@ uLabeledExprs = withSrc $
     (URecord <$> build "," "=" (Just varPun) Nothing)
     `fallBackTo` (URecordTy <$> build "&" ":" Nothing Nothing)
     `fallBackTo` (UVariantTy <$> build "|" ":" Nothing Nothing)
-  where build sep bindwith = parseLabeledItems sep bindwith expr
+  where build sep bindwith = parseLabeledItems sep bindwith expr expr
 
 varPun :: SrcPos -> Label -> UExpr
 varPun pos str = WithSrc pos $ UVar (mkName str :> ())
 
+uSugar :: Parser UExpr
+uSugar = withSrc $ USugar <$> (char '#' *> (
+    parseOpticLens <|> (char '!' *> parseOpticPrism))) where
+  parseOpticLens =
+    ULensRecordField <$> fieldLabel
+    <|> ULensRecord <$> parseLabeledItems "&" ":"
+                          (Just <$> expr) expr pun Nothing
+  parseOpticPrism =
+    UPrismVariantField <$> fieldLabel
+    <|> (UPrismRecord <$> parseLabeledItems "," "=" expr expr Nothing Nothing)
+    `fallBackTo` (UPrismVariant <$> parseLabeledItems "|" ":"
+                                      (Just <$> expr) expr pun Nothing)
+  pun = Just $ \_ _-> Nothing
+
 parseLabeledItems
-  :: String -> String -> Parser a
-  -> Maybe (SrcPos -> Label -> a) -> Maybe (SrcPos -> a)
-  -> Parser (ExtLabeledItems a a)
-parseLabeledItems sep bindwith itemparser punner tailDefault =
+  :: String -> String -> Parser a -> Parser b
+  -> Maybe (SrcPos -> Label -> a) -> Maybe (SrcPos -> b)
+  -> Parser (ExtLabeledItems a b)
+parseLabeledItems sep bindwith itemParser tailParser punner tailDefault =
   bracketed lBrace rBrace $ atBeginning
   where
     atBeginning = someItems
@@ -518,14 +533,14 @@ parseLabeledItems sep bindwith itemparser punner tailDefault =
     stopAndExtend = do
       WithSrc pos _ <- withSrc $ symbol "..."
       rest <- case tailDefault of
-        Just def -> itemparser <|> pure (def pos)
-        Nothing -> itemparser
+        Just def -> tailParser <|> pure (def pos)
+        Nothing -> tailParser
       return $ Ext NoLabeledItems (Just rest)
     beforeSep = (symbol sep >> afterSep) <|> stopWithoutExtend
     afterSep = someItems <|> stopAndExtend <|> stopWithoutExtend
     someItems = do
       WithSrc pos l <- withSrc $ fieldLabel
-      let explicitBound = symbol bindwith *> itemparser 
+      let explicitBound = symbol bindwith *> itemParser 
       itemVal <- case punner of
         Just punFn -> explicitBound <|> pure (punFn pos l)
         Nothing -> explicitBound
