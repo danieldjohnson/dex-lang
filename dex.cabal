@@ -25,7 +25,7 @@ library dex-resources
 
 library
   exposed-modules:     Env, Syntax, Type, Inference, JIT, LLVMExec,
-                       Parser, Util, Imp, MDImp, PPrint, Array, Algebra,
+                       Parser, Util, Imp, PPrint, Array, Algebra,
                        Actor, Cat, Flops, Embed, Serialize,
                        RenderHtml, Plot, LiveOutput, Simplify, TopLevel,
                        Autodiff, Interpreter, Logging, PipeRPC, CUDA
@@ -47,7 +47,7 @@ library
   hs-source-dirs:      src/lib
   ghc-options:         -Wall -O0
   cxx-sources:         src/lib/dexrt.cpp
-  cxx-options:         -std=c++17
+  cxx-options:         -std=c++11
   default-extensions:  CPP, DeriveTraversable, TypeApplications, OverloadedStrings,
                        TupleSections, ScopedTypeVariables, LambdaCase, PatternSynonyms
   if flag(cuda)

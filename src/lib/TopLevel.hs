@@ -17,7 +17,9 @@ import Control.Monad.Reader
 import Control.Monad.Except hiding (Except)
 import Data.Text.Prettyprint.Doc
 import Foreign.Ptr
-import Data.Maybe (fromJust, fromMaybe, mapMaybe)
+import Data.List (partition)
+import Data.Maybe (fromJust, fromMaybe)
+import Data.Time.Clock (getCurrentTime, diffUTCTime)
 
 import Array
 import Syntax
@@ -29,7 +31,6 @@ import Inference
 import Simplify
 import Serialize
 import Imp
-import MDImp
 import Interpreter
 import JIT
 import Logging
@@ -63,8 +64,9 @@ type TopPassM a = ReaderT EvalConfig IO a
 -- TODO: handle errors due to upstream modules failing
 evalSourceBlock :: EvalConfig -> TopEnv -> SourceBlock -> IO (TopEnv, Result)
 evalSourceBlock opts env block = do
-  (ans, outs) <- runTopPassM opts $ evalSourceBlockM env block
-  let outs' = mapMaybe (filterOutput block) outs
+  (ans, outs) <- runTopPassM opts $ withCompileTime $ evalSourceBlockM env block
+  let (logOuts, requiredOuts) = partition isLogInfo outs
+  let outs' = requiredOuts ++ processLogs (sbLogLevel block) logOuts
   case ans of
     Left err   -> return (mempty, Result outs' (Left (addCtx block err)))
     Right env' -> return (env'  , Result outs' (Right ()))
@@ -113,22 +115,37 @@ evalSourceBlockM env block = case sbContents block of
   UnParseable _ s -> liftEitherIO $ throw ParseErr s
   _               -> return mempty
 
-filterOutput :: SourceBlock -> Output -> Maybe Output
-filterOutput block output = case (output, sbLogLevel block) of
-  -- Everything goes under LogAll
-  (_              , LogAll          )                      -> Just output
-  -- Filter out all logs under LogNothing
-  (PassInfo _    _, LogNothing      )                      -> Nothing
-  (MiscLog  _     , LogNothing      )                      -> Nothing
-  (EvalTime _     , LogNothing      )                      -> Nothing
-  -- PrintEvalTime removes all output and converts EvalTime into text
-  (EvalTime t     , PrintEvalTime   )                      -> Just $ TextOut $ show t
-  (_              , PrintEvalTime   )                      -> Nothing
-  -- LogPasses filters out pass info
-  (PassInfo pass _, LogPasses passes) | pass `elem` passes -> Just output
-  (PassInfo _    _, LogPasses _     )                      -> Nothing
-  (MiscLog  _     , LogPasses _     )                      -> Nothing
-  (_              , _               )                      -> Just output
+processLogs :: LogLevel -> [Output] -> [Output]
+processLogs logLevel logs = case logLevel of
+  LogAll -> logs
+  LogNothing -> []
+  LogPasses passes -> flip filter logs $ \l -> case l of
+                        PassInfo pass _ | pass `elem` passes -> True
+                                        | otherwise          -> False
+  PrintEvalTime -> [BenchResult "" compileTime runTime]
+    where (compileTime, runTime) = timesFromLogs logs
+  PrintBench benchName -> [BenchResult benchName compileTime runTime]
+    where (compileTime, runTime) = timesFromLogs logs
+
+timesFromLogs :: [Output] -> (Double, Double)
+timesFromLogs logs = (totalTime - evalTime, evalTime)
+  where
+    evalTime  = case [tEval | EvalTime tEval <- logs] of
+                  []  -> 0.0
+                  [t] -> t
+                  _   -> error "Expect at most one result"
+    totalTime = case [tTotal | TotalTime tTotal <- logs] of
+                  []  -> 0.0
+                  [t] -> t
+                  _   -> error "Expect at most one result"
+
+isLogInfo :: Output -> Bool
+isLogInfo out = case out of
+  PassInfo _ _ -> True
+  MiscLog  _   -> True
+  EvalTime _   -> True
+  TotalTime _  -> True
+  _ -> False
 
 evalSourceBlocks :: TopEnv -> [SourceBlock] -> TopPassM TopEnv
 evalSourceBlocks env blocks = catFoldM evalSourceBlockM env blocks
@@ -164,7 +181,7 @@ evalModule :: TopEnv -> Module -> TopPassM TopEnv
 evalModule bindings normalized = do
   let defunctionalized = simplifyModule bindings normalized
   checkPass SimpPass defunctionalized
-  evaluated <- evalSimplified defunctionalized (evalBackend bindings)
+  evaluated <- evalSimplified defunctionalized evalBackend
   checkPass ResultPass evaluated
   Module Evaluated Empty newBindings <- return evaluated
   return newBindings
@@ -185,27 +202,33 @@ arrayVars x = foldMap go $ envPairs (freeVars x)
         go (v@(GlobalArrayName _), (ty, _)) = [v :> ty]
         go _ = []
 
-evalBackend :: Bindings -> Block -> TopPassM Atom
-evalBackend bindings block = do
+evalBackend :: Block -> TopPassM Atom
+evalBackend block = do
   backend <- asks evalEngine
   logger  <- asks logService
   let inVars = arrayVars block
   case backend of
     LLVMEngine kind llvmEnv -> do
-      let (impFunction, impAtom) = toImpFunction bindings (map Bind inVars, block)
-      checkPass ImpPass impFunction
-      -- logPass Flops $ impFunctionFlops impFunction
+      (llvmFunc, impAtom, impOutVars) <- case kind of
+        Serial -> do
+          let (impFunction, impAtom) = toImpFunction (map Bind inVars, block)
+          let (ImpFunction outVars _ _) = impFunction
+          checkPass ImpPass impFunction
+          return $ (impToLLVM impFunction, impAtom, outVars)
+        Multicore -> do
+          let (mdImpFunction, impAtom) = toMDImpFunction (map Bind inVars, block)
+          let (MDImpFunction outVars _ _) = mdImpFunction
+          logPass ImpPass mdImpFunction
+          return $ (mdImpToMulticore mdImpFunction, impAtom, outVars)
+        CUDA      -> do
+          let (mdImpFunction, impAtom) = toMDImpFunction (map Bind inVars, block)
+          logPass ImpPass mdImpFunction
+          let (MDImpFunction outVars _ _) = mdImpFunction
+          ptxFunction <- liftIO $ traverse compileKernel mdImpFunction
+          return $ (mdImpToCUDA ptxFunction, impAtom, outVars)
       resultAtom <- liftIO $ modifyMVar llvmEnv $ \env -> do
         let inPtrs = fmap (env !) inVars
-        llvmFunc <- case kind of
-          Serial    -> return $ impToLLVM impFunction
-          Multicore -> return $ mdImpToMulticore $ impToMDImp impFunction
-          CUDA      -> do
-            let mdImpFunction = impToMDImp impFunction
-            ptxFunction <- traverse compileKernel mdImpFunction
-            return $ mdImpToCUDA ptxFunction
         outPtrs <- callLLVM logger llvmFunc inPtrs
-        let (ImpFunction impOutVars _ _) = impFunction
         let (GlobalArrayName i) = fromMaybe (GlobalArrayName 0) $ envMaxName env
         let outNames = GlobalArrayName <$> [i+1..]
         let env' = foldMap varAsEnv $ zipWith (:>) outNames outPtrs
@@ -254,7 +277,6 @@ requestArrays backend vs = case backend of
       case envLookup env' v of
         Just ref -> do
           hostRef <- case (kind, ty) of
-            (CUDA     , BaseTy _) -> return ref  -- Scalar references are stored on the host
             (CUDA     , _       ) -> loadCUDAArray ref (fromIntegral $ size * sizeOf b)
               where b = scalarTableBaseType ty
             (Multicore, _       ) -> return ref
@@ -279,6 +301,14 @@ substArrayLiterals' backend vs x = do
   arrays <- requestArrays backend vs
   let arrayAtoms = [Con $ ArrayLit ty arr | (_:>ty, arr) <- zip vs arrays]
   return $ subst (newEnv vs arrayAtoms, mempty) x
+
+withCompileTime :: TopPassM a -> TopPassM a
+withCompileTime m = do
+  t1 <- liftIO $ getCurrentTime
+  ans <- m
+  t2 <- liftIO $ getCurrentTime
+  logTop $ TotalTime $ realToFrac $ t2 `diffUTCTime` t1
+  return ans
 
 checkPass :: (Pretty a, Checkable a) => PassName -> a -> TopPassM ()
 checkPass name x = do
