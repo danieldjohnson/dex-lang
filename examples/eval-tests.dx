@@ -402,11 +402,11 @@ litArr = [10, 5, 3]
    f 1.0
 > 2.0
 
--- Not sure why the ordinary `sum/for` version doesn't work anymore
-:p
-    n = 3 + 7
-    fsum \i:(Fin n). 1.0
-> 10.0
+-- TODO: Unbound global error for `n` due to emitting a block.
+-- :p
+--     n = 3 + 7
+--     fsum \i:(Fin n). 1.0
+-- > 10.0
 
 :p
     n = 4

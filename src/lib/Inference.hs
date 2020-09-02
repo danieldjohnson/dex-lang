@@ -333,7 +333,8 @@ unpackTopPat letAnn (WithSrc _ pat) expr = case pat of
 inferUDecl :: Bool -> UDecl -> UInferM SubstEnv
 inferUDecl topLevel (ULet letAnn (p, ann) rhs) = do
   val <- case ann of
-    Nothing -> inferSigma rhs
+    Nothing -> if topLevel then scopedWithImplicitArgs $ inferSigma rhs
+                           else inferSigma rhs
     Just ty -> checkUType ty >>= checkSigma rhs
   expr <- zonk $ Atom val
   if topLevel
@@ -357,6 +358,30 @@ inferUDecl True (UData tc dcs) = do
     extendScope $ dc @> (ty, DataBoundDataCon dataDef i)
   return mempty
 inferUDecl False (UData _ _) = error "data definitions should be top-level"
+
+scopedWithImplicitArgs :: UInferM Atom -> UInferM Atom
+scopedWithImplicitArgs inner = do
+  -- Capture the implicit types created by inner.
+  (block, env@(SolverEnv fvs sub)) <- scoped $ do
+    a <- buildScoped inner
+    applyDefaults
+    zonk a
+  let uns = unsolved env
+  let freeInType = freeVars $ getType block
+  -- Turn free inference variables that appear in the type into implicit args.
+  -- TODO: check that unifying the type with something else gives enough info
+  -- to actually solve for those implicit args.
+  let implicit = freeInType `envIntersect` uns
+  let addArg :: UInferM Atom -> VarP Kind -> UInferM Atom
+      addArg body infVar@(_:>k) = do
+        buildLam (Bind $ "a":>k) ImplicitArrow $ \x@(Var v) ->
+          checkLeaks [v] $ do
+            body' <- buildScoped body
+            body'' <- substEmbed (infVar @> x) body'
+            emitBlock body''
+  ans'' <- foldl addArg (emitBlock block) $ envAsVars implicit
+  extend $ SolverEnv (fvs `envDiff` implicit) (sub `envDiff` implicit)
+  return ans''
 
 inferUConDef :: UConDef -> UInferM (Name, Nest Binder)
 inferUConDef (UConDef v bs) = do

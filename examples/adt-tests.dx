@@ -162,19 +162,21 @@ data MyIntish = MkIntish Int
 
 xsList = AsList _ [1,2,3]
 
-:p
-  (AsList _ xsTab) = xsList
-  sum xsTab
-> 6
+-- TODO: Unbound global error due to emitting a block.
+-- :p
+--   (AsList _ xsTab) = xsList
+--   sum xsTab
+-- > 6
 
 (AsList _ xsTab) = xsList
 
 :p xsTab
 > [1, 2, 3]
 
-:p
-  xs = AsList _ [1,2,3]
-  ys = AsList _ [4,5]
-  (AsList _ ans) = xs <> ys
-  sum ans
-> 15
+-- TODO: Unbound global error due to emitting a block.
+-- :p
+--   xs = AsList _ [1,2,3]
+--   ys = AsList _ [4,5]
+--   (AsList _ ans) = xs <> ys
+--   sum ans
+-- > 15

@@ -1,9 +1,13 @@
 
-:t astype (IsoLens {foo:Int & bar:Float} _ _) #foo
-> (IsoLens {bar: Float32 & foo: Int32} Int32 {bar: Float32})
+:t #foo
+> ((a:Fields) ?-> (a1:Type) ?-> IsoLens {foo: a1 & ...a} a1 { & ...a})
 
-:t astype (IsoLens {foo:{a:Int} & bar:{baz:Float & qux:Unit}} _ _) #{foo & bar:#baz}
-> (IsoLens
->    {bar: {baz: Float32 & qux: Unit} & foo: {a: Int32}}
->    {bar: Float32 & foo: {a: Int32}}
->    {bar: {qux: Unit}})
+:t #{foo & bar:#baz}
+> ((a:Fields)
+>  ?-> (a1:Type)
+>  ?-> (a2:Fields)
+>  ?-> (a3:Type)
+>  ?-> IsoLens
+>        {bar: {baz: a3 & ...a2} & foo: a1 & ...a}
+>        {bar: a3 & foo: a1}
+>        {bar: { & ...a2} & ...a})
