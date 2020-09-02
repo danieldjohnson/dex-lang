@@ -720,16 +720,29 @@ makeRight x = do
   return $ DataCon eitherDef [lty, getType x] i [x]
 
 makeVariant :: LabeledItems a -> Label -> Atom -> UInferM Atom
-makeVariant skip label atom = do
+makeVariant skip@(LabeledItems items) label atom = do
   rest <- freshInferenceName LabeledRowKind
   prefix <- mapM (const $ freshType TyKind) skip
   let known = prefix <> (labeledSingleton label $ getType atom)
-  return $ Variant (Ext known $ Just rest) label 0 atom
+  let i = case M.lookup label items of
+            Nothing -> 0
+            Just xs -> NE.length xs
+  return $ Variant (Ext known $ Just rest) label i atom
 
 liftVariant :: LabeledItems a -> Atom -> UInferM Atom
 liftVariant skip atom = do
   prefix <- mapM (const $ freshType TyKind) skip
-  emitOp $ VariantLift prefix atom
+  row <- freshInferenceName LabeledRowKind
+  constrainEq (getType atom) $ VariantTy $ Ext NoLabeledItems $ Just row
+  atom' <- zonk atom
+  emitOp $ VariantLift prefix atom'
+
+makeApp :: Atom -> Atom -> UInferM Atom
+makeApp f x = do
+  rty <- freshType TyKind
+  constrainEq (getType f) $ Pi $ Abs (Ignore $ getType x) (PureArrow, rty)
+  f' <- zonk f
+  emit $ App f' x
 
 constrainedAs :: Type -> Atom -> UInferM Atom
 constrainedAs ty atom = constrainEq (getType atom) ty *> return atom
@@ -858,7 +871,7 @@ desugar sugar = case sugar of
             rest <- restBuild $ Con $ PairCon fr ir
             recordCons known rest
       makeLens split build
-    -- #!foo desugars to
+    -- #?foo desugars to
     -- MkIsoPrism { split=\v. case v of {|foo=x|}    -> Left x
     --                                  {|foo|...y|} -> Right y
     --            , build=\v. case v of Left x  -> {|foo=x|}
@@ -869,77 +882,47 @@ desugar sugar = case sugar of
         Left v -> makeVariant NoLabeledItems label v
         Right v -> liftVariant (labeledSingleton label ()) v
       in makePrism split build
-    -- #!{foo | bar:barPrism | ...restPrism} desugars to something like
-    -- MkIsoPrism { split=\v. case v of
-    --                 {|foo=x|} -> Left {|foo=x|}
-    --                 {|bar=x|} -> case splitPrism barPrism x of
-    --                                 Left y  -> Left  {|bar=y|}
-    --                                 Right y -> Right {|bar=y|}
-    --                 {|foo|bar|...x|} -> case splitPrism restPrism x of
-    --                                 Left y  -> Left  {|foo|bar|...y|}
-    --                                 Right y -> Right {|foo|bar|...y|}
-    --            , build=\v. case v of
-    --                 Left {|foo=x|} -> {|foo=x|}
-    --                 Left {|bar=x|} -> {|bar=buildPrism barPrism $ Left x |}
-    --                 Left {|foo|bar|...x|} ->
-    --                   {|foo|bar|...buildPrism barPrism $ Left x|}
-    --                 Right {|bar=x|} -> {|bar=buildPrism barPrism $ Right x |}
-    --                 Right {|foo|bar|...x|} ->
-    --                   {|foo|bar|...buildPrism barPrism $ Right x|}
-    --            }
-    UPrismVariant (Ext prisms restPrism) -> do
-      restPrism' <- inferOrUseGlobal "prismNone" restPrism
-      (restSplit, restBuild) <- unpackOptic "IsoPrism" restPrism'
-      let step (splitters, leftBuilders, rightBuilders) (label, _, prism) =
-            case prism of
-              Just prism' -> do
-                -- {foo:fooPrism | ...} case: split with the provided optic.
-                (prismSplit, prismBuild) <-
-                    unpackOptic "IsoPrism" =<< inferRho prism'
-                let
-                  -- Note: the labels in leftBuilders/rightBuilders are the ones
-                  -- we need to lift over when splitting something to the
-                  -- left/right; conversely the labels in splitters are the ones
-                  -- we need to lift over when building something.
-                  splitter = labeledSingleton label $ \v -> do
-                    v' <- prismSplit v
-                    flip matchEither v' $ \case
-                      Left l  -> makeLeft  =<< makeVariant leftBuilders label l
-                      Right r -> makeRight =<< makeVariant rightBuilders label r
-                  leftBuilder = labeledSingleton label $ \l ->
-                    makeVariant splitters label =<< prismBuild =<< makeLeft l
-                  rightBuilder = labeledSingleton label $ \r -> do
-                    makeVariant splitters label =<< prismBuild =<< makeRight r
-                return ( splitters <> splitter
-                       , leftBuilders <> leftBuilder
-                       , rightBuilders <> rightBuilder)
-              -- {foo | ...} case: put entire slice into the focus.
-              Nothing -> let
-                splitter = labeledSingleton label $ \v ->
-                  makeLeft =<< makeVariant leftBuilders label v
-                leftBuilder = labeledSingleton label $ \l ->
-                  makeVariant splitters label l
-                in return ( splitters <> splitter
-                          , leftBuilders <> leftBuilder
-                          , rightBuilders)
+    -- #!foo desugars to \x. {|foo=x|}
+    UIndexerVariantField label -> do
+      ty <- freshType TyKind
+      buildLam (Ignore ty) PureArrow $ makeVariant NoLabeledItems label
+    -- #!{foo | bar:barIxr | ...restIxr} desugars to
+    -- \v:{foo:_ | bar:_, | ..._}. case v of
+    --    {|foo=x|} -> {|foo=x|}
+    --    {|bar=x|} -> {|bar=barIxr x|}
+    --    {|foo|bar|...other|} -> restIxr other
+    UIndexerVariant (Ext ixrs restIxr) -> do
+      restIxr' <- inferOrUseGlobal "voidIxr" restIxr
+      let step labeledAlts (label, _, ixr) =
+            labeledAlts <> labeledSingleton label go where
+              go x = case ixr of
+                Just ixr' -> do
+                  ixr'' <- inferRho ixr'
+                  res <- makeApp ixr'' x
+                  makeVariant labeledAlts label res
+                Nothing -> makeVariant labeledAlts label x
+          fallback = makeApp restIxr'
       -- Fold over the fields in forward order (so we know what fields to skip).
-      (splitters, leftBuilders, rightBuilders) <- foldM step
-        (NoLabeledItems, NoLabeledItems, NoLabeledItems)
-        (toList $ withLabels prisms)
-      let split = matchVariantFields splitters $ \v -> do
-            v' <- restSplit v
-            flip matchEither v' $ \case
-              Left l -> makeLeft =<< liftVariant leftBuilders l
-              Right r -> makeRight =<< liftVariant rightBuilders r
-      let build = matchEither $ \case
-            Left l -> matchVariantFields leftBuilders
-              (\v -> liftVariant splitters =<< restBuild =<< makeLeft v) l
-            Right r -> matchVariantFields rightBuilders
-              (\v -> liftVariant splitters =<< restBuild =<< makeRight v) r
-      makePrism split build
-    -- TODO: record prisms
-    UPrismRecord _ -> do
-      throw NotImplementedErr "!"
+      let labeledAlts = foldl step NoLabeledItems (toList $ withLabels ixrs)
+      ty <- freshType TyKind
+      buildLam (Ignore ty) PureArrow $ matchVariantFields labeledAlts fallback
+    -- #!{foo, bar=barIxr, ...restIxr} desugars to
+    --  \{foo, bar, ...rest}. {bar=barIxr bar, ...(restIxr rest)}
+    UIndexerRecord (Ext ixrs restIxr) -> do
+      restIxr' <- inferOrUseGlobal "id" restIxr
+      ty <- freshType TyKind
+      buildLam (Ignore ty) PureArrow $ \x -> do
+        (fields, rest) <- getRecordFields ixrs x
+        let step newfields ((label, _, ixr), field) = case ixr of
+              Just ixr' -> do
+                ixr'' <- inferRho ixr'
+                v <- makeApp ixr'' field
+                return $ labeledSingleton label v <> newfields
+              Nothing -> return newfields
+        newfields <- foldM step NoLabeledItems $ reverse $
+          zip (toList $ withLabels ixrs) (toList fields)
+        rest' <- makeApp restIxr' rest
+        recordCons newfields rest'
 
 -- === typeclass dictionary synthesizer ===
 

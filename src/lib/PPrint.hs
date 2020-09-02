@@ -20,7 +20,6 @@ import Data.Foldable (toList)
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as M
 import qualified Data.ByteString.Lazy.Char8 as B
-import Data.Maybe (fromMaybe)
 import Data.String (fromString)
 import Data.Text.Prettyprint.Doc.Render.Text
 import Data.Text.Prettyprint.Doc
@@ -344,11 +343,19 @@ fromInfix t = do
 
 prettyExtLabeledItems :: (PrettyPrec a, PrettyPrec b)
   => ExtLabeledItems a b -> Doc ann -> Doc ann -> DocPrec ann
-prettyExtLabeledItems (Ext (LabeledItems row) rest) separator bindwith =
+prettyExtLabeledItems (Ext items rest) separator bindwith =
+  prettyExtOptionalLabeledItems (Ext items' rest) separator bindwith where
+    items' = fmap Just items
+
+prettyExtOptionalLabeledItems :: (PrettyPrec a, PrettyPrec b)
+  => ExtLabeledItems (Maybe a) b -> Doc ann -> Doc ann -> DocPrec ann
+prettyExtOptionalLabeledItems (Ext (LabeledItems row) rest) separator bindwith =
   atPrec ArgPrec $ align $ group $ innerDoc
   where
     elems = concatMap (\(k, vs) -> map (k,) (toList vs)) (M.toAscList row)
-    fmtElem (label, v) = p label <> bindwith <+> pLowest v
+    fmtElem (label, v) = case v of
+      Just v' -> p label <> bindwith <+> pLowest v'
+      Nothing -> p label
     docs = map fmtElem elems
     final = case rest of
       Just v -> separator <> " ..." <> pArg v
@@ -588,17 +595,13 @@ instance PrettyPrec USugar where
   prettyPrec sugar = case sugar of
     ULensRecordField field -> atPrec ArgPrec $ "#" <> p field
     ULensRecord items -> atPrec ArgPrec $ "#" <>
-      prettyExtLabeledItems (wrap items) (line <> "&") ":" ArgPrec
-    UPrismVariantField field -> atPrec ArgPrec $ "#!" <> p field
-    UPrismRecord items -> atPrec ArgPrec $ "#!" <>
-      prettyExtLabeledItems items (line' <> ",") " =" ArgPrec
-    UPrismVariant items -> atPrec ArgPrec $ "#!" <>
-      prettyExtLabeledItems (wrap items) (line <> "|") ":" ArgPrec
-    where
-      wrap :: ExtLabeledItems (Maybe UExpr) UExpr
-           -> ExtLabeledItems UExpr UExpr
-      wrap (Ext items rest) =
-        Ext (fmap (fromMaybe (WithSrc (-1, -1) UHole)) items) rest
+      prettyExtOptionalLabeledItems items (line <> "&") ":" ArgPrec
+    UPrismVariantField field -> atPrec ArgPrec $ "#?" <> p field
+    UIndexerVariantField field -> atPrec ArgPrec $ "#!" <> p field
+    UIndexerRecord items -> atPrec ArgPrec $ "#!" <>
+      prettyExtOptionalLabeledItems items (line <> "&") ":" ArgPrec
+    UIndexerVariant items -> atPrec ArgPrec $ "#!" <>
+      prettyExtOptionalLabeledItems items (line <> "|") ":" ArgPrec
 
 spaced :: (Foldable f, Pretty a) => f a -> Doc ann
 spaced xs = hsep $ map p $ toList xs

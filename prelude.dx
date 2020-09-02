@@ -628,3 +628,4 @@ prismAll : IsoPrism full full {|} =
 
 prismNone : IsoPrism full {|} full = exclude prismAll
 
+def voidIxr (impossible:{|}) : a = todo

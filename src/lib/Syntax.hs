@@ -260,11 +260,12 @@ data UPat' = UPatBinder UBinder
 
 -- Syntactic sugar; expanded during inference.
 data USugar
-  = ULensRecordField Label                              -- #a
-  | ULensRecord (ExtLabeledItems (Maybe UExpr) UExpr)   -- #{a, b:y, ...c}
-  | UPrismVariantField Label                            -- #!a
-  | UPrismRecord (ExtLabeledItems UExpr UExpr)          -- #!{a=x, b=y, ...c}
-  | UPrismVariant (ExtLabeledItems (Maybe UExpr) UExpr) -- #!{a, b:y, ...c}
+  = ULensRecordField Label                                -- #a
+  | ULensRecord (ExtLabeledItems (Maybe UExpr) UExpr)     -- #{a & b:y & ...c}
+  | UPrismVariantField Label                              -- #?a
+  | UIndexerVariantField Label                            -- #!a
+  | UIndexerRecord (ExtLabeledItems (Maybe UExpr) UExpr)  -- #!{a & b:y & ...c}
+  | UIndexerVariant (ExtLabeledItems (Maybe UExpr) UExpr) -- #!{a | b:y | ...c}
   deriving (Show, Generic)
 
 data WithSrc a = WithSrc SrcPos a
@@ -731,8 +732,9 @@ instance HasUVars USugar where
     ULensRecordField _ -> mempty
     ULensRecord items -> freeUVars items
     UPrismVariantField _ -> mempty
-    UPrismRecord items -> freeUVars items
-    UPrismVariant items -> freeUVars items
+    UIndexerVariantField _ -> mempty
+    UIndexerRecord items -> freeUVars items
+    UIndexerVariant items -> freeUVars items
 
 instance HasUVars UDecl where
   freeUVars (ULet _ p expr) = freeUVars p <> freeUVars expr

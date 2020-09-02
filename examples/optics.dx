@@ -11,3 +11,28 @@
 >        {bar: {baz: a3 & ...a2} & foo: a1 & ...a}
 >        {bar: a3 & foo: a1}
 >        {bar: { & ...a2} & ...a})
+
+:t #?foo
+> ((a:Type) ?-> (a1:Fields) ?-> IsoPrism {foo: a | ...a1} a { | ...a1})
+
+:t #!foo
+> ((a:Fields) ?-> (a1:Type) ?-> a1 -> {foo: a1 | ...a})
+
+:t #!{foo | bar:#!baz | foo:#!foo2}
+> ((a:Type)
+>  ?-> (a1:Fields)
+>  ?-> (a2:Fields)
+>  ?-> (a3:Type)
+>  ?-> (a4:Fields)
+>  ?-> (a5:Type)
+>  ?-> {bar: a5 | foo: a | foo: a3}
+>  -> {bar: {baz: a5 | ...a4} | foo: a | foo: {foo2: a3 | ...a2} | ...a1})
+
+:t #!{foo & bar:#!bar & foo:id}
+> ((a:Fields)
+>  ?-> (a1:Type)
+>  ?-> (a2:Type)
+>  ?-> (a3:Fields)
+>  ?-> (a4:Type)
+>  ?-> {bar: a1 & foo: a4 & foo: a2 & ...a3}
+>  -> {bar: {bar: a1 | ...a} & foo: a2 & ...a3})

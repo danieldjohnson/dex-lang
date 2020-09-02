@@ -507,17 +507,21 @@ varPun pos str = WithSrc pos $ UVar (mkName str :> ())
 
 uSugar :: Parser UExpr
 uSugar = withSrc $ USugar <$> (char '#' *> (
-    parseOpticLens <|> (char '!' *> parseOpticPrism))) where
-  parseOpticLens =
+    parseLens
+    <|> (char '?' *> parsePrism)
+    <|> (char '!' *> parseIndexer))) where
+  parseLens =
     ULensRecordField <$> fieldLabel
     <|> ULensRecord <$> parseLabeledItems "&" ":"
-                          (Just <$> expr) expr pun Nothing
-  parseOpticPrism =
-    UPrismVariantField <$> fieldLabel
-    <|> (UPrismRecord <$> parseLabeledItems "," "=" expr expr Nothing Nothing)
-    `fallBackTo` (UPrismVariant <$> parseLabeledItems "|" ":"
-                                      (Just <$> expr) expr pun Nothing)
-  pun = Just $ \_ _-> Nothing
+                          (Just <$> expr) expr missing Nothing
+  parsePrism = UPrismVariantField <$> fieldLabel
+  parseIndexer =
+    UIndexerVariantField <$> fieldLabel
+    <|> (UIndexerRecord <$> parseLabeledItems "&" ":"
+                            (Just <$> expr) expr missing Nothing)
+    `fallBackTo` (UIndexerVariant <$> parseLabeledItems "|" ":"
+                                      (Just <$> expr) expr missing Nothing)
+  missing = Just $ \_ _-> Nothing
 
 parseLabeledItems
   :: String -> String -> Parser a -> Parser b
