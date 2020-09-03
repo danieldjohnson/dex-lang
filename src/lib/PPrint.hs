@@ -343,22 +343,21 @@ fromInfix t = do
 
 prettyExtLabeledItems :: (PrettyPrec a, PrettyPrec b)
   => ExtLabeledItems a b -> Doc ann -> Doc ann -> DocPrec ann
-prettyExtLabeledItems (Ext items rest) separator bindwith =
-  prettyExtOptionalLabeledItems (Ext items' rest) separator bindwith where
-    items' = fmap Just items
+prettyExtLabeledItems items separator bindwith =
+  prettyFancyExtLabeledItems items pBindVal pRest separator where
+    pBindVal v = bindwith <+> pLowest v
+    pRest = pArg
 
-prettyExtOptionalLabeledItems :: (PrettyPrec a, PrettyPrec b)
-  => ExtLabeledItems (Maybe a) b -> Doc ann -> Doc ann -> DocPrec ann
-prettyExtOptionalLabeledItems (Ext (LabeledItems row) rest) separator bindwith =
+prettyFancyExtLabeledItems :: ExtLabeledItems a b -> (a -> Doc ann)
+                           -> (b -> Doc ann) -> Doc ann -> DocPrec ann
+prettyFancyExtLabeledItems (Ext (LabeledItems row) rest) pBindVal pRest separator =
   atPrec ArgPrec $ align $ group $ innerDoc
   where
     elems = concatMap (\(k, vs) -> map (k,) (toList vs)) (M.toAscList row)
-    fmtElem (label, v) = case v of
-      Just v' -> p label <> bindwith <+> pLowest v'
-      Nothing -> p label
+    fmtElem (label, v) = p label <> pBindVal v
     docs = map fmtElem elems
     final = case rest of
-      Just v -> separator <> " ..." <> pArg v
+      Just v -> separator <> " ..." <> pRest v
       Nothing -> case length docs of
         0 -> separator
         _ -> mempty
@@ -595,13 +594,22 @@ instance PrettyPrec USugar where
   prettyPrec sugar = case sugar of
     ULensRecordField field -> atPrec ArgPrec $ "#" <> p field
     ULensRecord items -> atPrec ArgPrec $ "#" <>
-      prettyExtOptionalLabeledItems items (line <> "&") ":" ArgPrec
+      prettyFancyExtLabeledItems items
+        pOptItem pLowest (line <> "&") ArgPrec
     UPrismVariantField field -> atPrec ArgPrec $ "#?" <> p field
     UIndexerVariantField field -> atPrec ArgPrec $ "#!" <> p field
     UIndexerRecord items -> atPrec ArgPrec $ "#!" <>
-      prettyExtOptionalLabeledItems items (line <> "&") ":" ArgPrec
+      prettyFancyExtLabeledItems items
+        pIxrRecItem pLowest (line <> "&") ArgPrec
     UIndexerVariant items -> atPrec ArgPrec $ "#!" <>
-      prettyExtOptionalLabeledItems items (line <> "|") ":" ArgPrec
+      prettyFancyExtLabeledItems items
+        pOptItem pLowest (line <> "|") ArgPrec
+    where
+      pOptItem item = case item of Just item' -> ":" <+> pLowest item'
+                                   Nothing -> mempty
+      pIxrRecItem item = case item of IndexWithFunc f -> ":" <+> pLowest f
+                                      IndexWithValue v -> " =" <+> pLowest v
+                                      IndexWithBroadcast -> "<-new"
 
 spaced :: (Foldable f, Pretty a) => f a -> Doc ann
 spaced xs = hsep $ map p $ toList xs

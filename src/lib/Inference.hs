@@ -911,18 +911,33 @@ desugar sugar = case sugar of
     UIndexerRecord (Ext ixrs restIxr) -> do
       restIxr' <- inferOrUseGlobal "id" restIxr
       ty <- freshType TyKind
+      let step (wanted, rebuilder) (label, _, ixr) = case ixr of
+            IndexWithFunc f -> (wanted', rebuilder') where
+              wanted' = labeledSingleton label () <> wanted
+              rebuilder' fields = do
+                Just (x, fields') <- return $ popLabeled label fields
+                f' <- inferRho f
+                v <- makeApp f' x
+                newFields <- rebuilder fields'
+                return $ labeledSingleton label v <> newFields
+            IndexWithValue v -> (wanted, rebuilder') where
+              rebuilder' fields = do
+                v' <- inferRho v
+                newFields <- rebuilder fields
+                return $ labeledSingleton label v' <> newFields
+            IndexWithBroadcast -> (wanted', rebuilder') where
+              wanted' = labeledSingleton label () <> wanted
+              rebuilder' fields = do
+                Just (_, fields') <- return $ popLabeled label fields
+                rebuilder fields'
       buildLam (Ignore ty) PureArrow $ \x -> do
-        (fields, rest) <- getRecordFields ixrs x
-        let step newfields ((label, _, ixr), field) = case ixr of
-              Just ixr' -> do
-                ixr'' <- inferRho ixr'
-                v <- makeApp ixr'' field
-                return $ labeledSingleton label v <> newfields
-              Nothing -> return newfields
-        newfields <- foldM step NoLabeledItems $ reverse $
-          zip (toList $ withLabels ixrs) (toList fields)
-        rest' <- makeApp restIxr' rest
-        recordCons newfields rest'
+        let (wanted, rebuilder) = foldl step
+              (NoLabeledItems, const $ return NoLabeledItems) $
+              reverse $ toList $ withLabels ixrs
+        (fields, rest) <- getRecordFields wanted x
+        newFields <- rebuilder fields
+        newRest <- makeApp restIxr' rest
+        recordCons newFields newRest
 
 -- === typeclass dictionary synthesizer ===
 

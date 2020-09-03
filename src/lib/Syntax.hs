@@ -35,6 +35,7 @@ module Syntax (
     strToName, nameToStr, showPrimName,
     monMapSingle, monMapLookup, Direction (..), ArrayRef, Array, Limit (..),
     UExpr, UExpr' (..), UType, UPatAnn, UAnnBinder, UVar, USugar (..),
+    UIndexerRecordField (..),
     UPat, UPat' (..), UModule (..), UDecl (..), UArrow, arrowEff,
     DataDef (..), DataConDef (..), UConDef (..), Nest (..), toNest,
     subst, deShadow, scopelessSubst, absArgType, applyAbs, makeAbs,
@@ -264,8 +265,14 @@ data USugar
   | ULensRecord (ExtLabeledItems (Maybe UExpr) UExpr)     -- #{a & b:y & ...c}
   | UPrismVariantField Label                              -- #?a
   | UIndexerVariantField Label                            -- #!a
-  | UIndexerRecord (ExtLabeledItems (Maybe UExpr) UExpr)  -- #!{a & b:y & ...c}
+  | UIndexerRecord (ExtLabeledItems UIndexerRecordField UExpr)  -- #!{a & b:y & ...c}
   | UIndexerVariant (ExtLabeledItems (Maybe UExpr) UExpr) -- #!{a | b:y | ...c}
+  deriving (Show, Generic)
+
+data UIndexerRecordField
+  = IndexWithFunc UExpr
+  | IndexWithValue UExpr
+  | IndexWithBroadcast
   deriving (Show, Generic)
 
 data WithSrc a = WithSrc SrcPos a
@@ -735,6 +742,12 @@ instance HasUVars USugar where
     UIndexerVariantField _ -> mempty
     UIndexerRecord items -> freeUVars items
     UIndexerVariant items -> freeUVars items
+
+instance HasUVars UIndexerRecordField where
+  freeUVars rf = case rf of
+    IndexWithFunc e -> freeUVars e
+    IndexWithValue e -> freeUVars e
+    IndexWithBroadcast -> mempty
 
 instance HasUVars UDecl where
   freeUVars (ULet _ p expr) = freeUVars p <> freeUVars expr

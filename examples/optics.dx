@@ -28,11 +28,10 @@
 >  ?-> {bar: a5 | foo: a | foo: a3}
 >  -> {bar: {baz: a5 | ...a4} | foo: a | foo: {foo2: a3 | ...a2} | ...a1})
 
-:t #!{foo & bar:#!bar & foo:id}
-> ((a:Fields)
->  ?-> (a1:Type)
+:t #!{foo<-new & bar:#!bar & baz=3@_}
+> ((a:Type)
+>  ?-> (a1:Fields)
 >  ?-> (a2:Type)
 >  ?-> (a3:Fields)
 >  ?-> (a4:Type)
->  ?-> {bar: a1 & foo: a4 & foo: a2 & ...a3}
->  -> {bar: {bar: a1 | ...a} & foo: a2 & ...a3})
+>  ?-> {bar: a2 & foo: a4 & ...a3} -> {bar: {bar: a2 | ...a1} & baz: a & ...a3})

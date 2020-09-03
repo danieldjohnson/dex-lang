@@ -517,17 +517,31 @@ uSugar = withSrc $ USugar <$> (char '#' *> (
   parsePrism = UPrismVariantField <$> fieldLabel
   parseIndexer =
     UIndexerVariantField <$> fieldLabel
-    <|> (UIndexerRecord <$> parseLabeledItems "&" ":"
-                            (Just <$> expr) expr missing Nothing)
+    <|> (UIndexerRecord <$> parseFancyLabeledItems "&" ixrRecBind (const expr))
     `fallBackTo` (UIndexerVariant <$> parseLabeledItems "|" ":"
                                       (Just <$> expr) expr missing Nothing)
   missing = Just $ \_ _-> Nothing
+  ixrRecBind _ _ = symbol "=" *> (IndexWithValue <$> expr)
+               <|> symbol ":" *> (IndexWithFunc <$> expr)
+               <|> symbol "<-" *> symbol "new" *> return IndexWithBroadcast
 
 parseLabeledItems
   :: String -> String -> Parser a -> Parser b
   -> Maybe (SrcPos -> Label -> a) -> Maybe (SrcPos -> b)
   -> Parser (ExtLabeledItems a b)
 parseLabeledItems sep bindwith itemParser tailParser punner tailDefault =
+  parseFancyLabeledItems sep itemBindParser tailParser' where
+    itemBindParser pos l = case punner of
+      Just punner' -> (symbol bindwith *> itemParser) <|> return (punner' pos l)
+      Nothing -> symbol bindwith *> itemParser
+    tailParser' pos = case tailDefault of
+      Just tailDefault' -> tailParser <|> return (tailDefault' pos)
+      Nothing -> tailParser
+
+parseFancyLabeledItems
+  :: String -> (SrcPos -> Label -> Parser a) -> (SrcPos -> Parser b)
+  -> Parser (ExtLabeledItems a b)
+parseFancyLabeledItems sep itemBindParser tailParser =
   bracketed lBrace rBrace $ atBeginning
   where
     atBeginning = someItems
@@ -536,18 +550,13 @@ parseLabeledItems sep bindwith itemParser tailParser punner tailDefault =
     stopWithoutExtend = return $ NoExt NoLabeledItems
     stopAndExtend = do
       WithSrc pos _ <- withSrc $ symbol "..."
-      rest <- case tailDefault of
-        Just def -> tailParser <|> pure (def pos)
-        Nothing -> tailParser
+      rest <- tailParser pos
       return $ Ext NoLabeledItems (Just rest)
     beforeSep = (symbol sep >> afterSep) <|> stopWithoutExtend
     afterSep = someItems <|> stopAndExtend <|> stopWithoutExtend
     someItems = do
       WithSrc pos l <- withSrc $ fieldLabel
-      let explicitBound = symbol bindwith *> itemParser 
-      itemVal <- case punner of
-        Just punFn -> explicitBound <|> pure (punFn pos l)
-        Nothing -> explicitBound
+      itemVal <- itemBindParser pos l
       rest <- beforeSep
       return $ prefixExtLabeledItems (labeledSingleton l itemVal) rest
 
