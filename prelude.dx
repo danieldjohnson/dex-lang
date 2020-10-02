@@ -19,8 +19,6 @@ Float32 = %Float32
 Int = Int32
 Float = Float32
 
-def (.) (tab:n=>a) (x:n) : a = %tableApp tab x
-
 def internalCast (b:Type) (x:a) : b = %cast b x
 
 def F64ToF (x : Float64) : Float   = internalCast _ x
@@ -35,6 +33,32 @@ def IToI32 (x : Int)     : Int32   = internalCast _ x
 def IToI8  (x : Int)     : Int8    = internalCast _ x
 def IToF (x:Int) : Float = internalCast _ x
 def FToI (x:Float) : Int = internalCast _ x
+
+'Working with index sets
+
+def Range (low:Int) (high:Int) : Type = %IntRange low high
+def Fin (n:Int) : Type = Range 0 n
+def ordinal (i:a) : Int = %asint i
+def size (n:Type) : Int = %idxSetSize n
+def fromOrdinal (n:Type) (i:Int) : n = %asidx n i
+def asidx (n:Type) ?-> (i:Int) : n = fromOrdinal n i
+def (@) (i:Int) (n:Type) : n = fromOrdinal n i
+def iota (n:Type) : n=>Int = for i. ordinal i
+
+data IndexesInto a:Type b:Type = MkIndexesInto (a -> b)
+
+@instance indexesIntoRefl : a `IndexesInto` a = MkIndexesInto (\x. x)
+
+@instance
+def indexesIntoFin (n:Int)?-> : Int `IndexesInto` Fin n =
+  MkIndexesInto (fromOrdinal $ Fin n)
+
+def (.) (tab:i=>a) (x:j) (inject:IndexesInto j i)?=> : a =
+  (MkIndexesInto fn) = inject
+  x' = fn x
+  %tableApp tab x'
+
+'Basic interfaces
 
 interface Add a:Type where
   add : a -> a -> a
@@ -282,6 +306,14 @@ def (>=) (d:Ord a) ?=> (x:a) (y:a) : Bool = x>y || x==y
                                                       (\x y. I8ToB $ %ilt x y))
 @instance unitOrd    : Ord Unit    = (MkOrd unitEq (\x y. False) (\x y. False))
 
+-- TODO: we want Eq and Ord for all index sets, not just `Fin n`
+@instance
+def finEq (n:Int) ?-> : Eq (Fin n) = MkEq \x y. ordinal x == ordinal y
+
+@instance
+def finOrd (n:Int) ?-> : Ord (Fin n) =
+  MkOrd finEq (\x y. ordinal x > ordinal y) (\x y. ordinal x < ordinal y)
+
 @instance
 def pairEq (eqA: Eq a)?=> (eqB: Eq b)?=> : Eq (a & b) = MkEq $
   \(x1,x2) (y1,y2). x1 == y1 && x2 == y2
@@ -297,7 +329,7 @@ def pairOrd (ordA: Ord a)?=> (ordB: Ord b)?=> : Ord (a & b) =
 def tabEq (n:Type) ?-> (eqA: Eq a) ?=> : Eq (n=>a) = MkEq $
   \xs ys.
     numDifferent : Float =
-      snd $ withAccum \ref. for i.
+      snd $ withAccum \ref. for i:n.
         ref += (IToF (BToI (xs.i /= ys.i)))
     numDifferent == 0.0
 
@@ -343,25 +375,6 @@ float32Floating : Floating Float32 =
               (\x. %sqrt   x) (\x y. %fpow x y)
               (\x. %lgamma x))
 
-'Working with index sets
-
-def Range (low:Int) (high:Int) : Type = %IntRange low high
-def Fin (n:Int) : Type = Range 0 n
-def ordinal (i:a) : Int = %asint i
-def size (n:Type) : Int = %idxSetSize n
-def fromOrdinal (n:Type) (i:Int) : n = %asidx n i
-def asidx (n:Type) ?-> (i:Int) : n = fromOrdinal n i
-def (@) (i:Int) (n:Type) : n = fromOrdinal n i
-def iota (n:Type) : n=>Int = for i. ordinal i
-
--- TODO: we want Eq and Ord for all index sets, not just `Fin n`
-@instance
-def finEq (n:Int) ?-> : Eq (Fin n) = MkEq \x y. ordinal x == ordinal y
-
-@instance
-def finOrd (n:Int) ?-> : Ord (Fin n) =
-  MkOrd finEq (\x y. ordinal x > ordinal y) (\x y. ordinal x < ordinal y)
-
 'Misc
 
 pi : Float = 3.141592653589793
@@ -377,7 +390,7 @@ def abs (x:Float) : Float = select (x > 0.0) x (-x)
 def mod (x:Int) (y:Int) : Int = rem (y + rem x y) y
 
 def slice (xs:n=>a) (start:Int) (m:Type) : m=>a =
-  for i. xs.(fromOrdinal _ (ordinal i + start))
+  for i. xs.(fromOrdinal n (ordinal i + start))
 
 def reindex (ixr: b -> a) (tab: a=>v) : b=>v = for i. tab.(ixr i)
 
@@ -393,7 +406,7 @@ def reduce (identity:a) (binop:(a->a->a)) (xs:n=>a) : a =
   -- `binop` should be a commutative and associative, and form a
   -- commutative monoid with `identity`
   -- TODO: implement with a parallelizable monoid-parameterized writer
-  fold identity (\i c. binop c xs.i)
+  fold identity (\i:n c. binop c xs.i)
 
 -- TODO: call this `scan` and call the current `scan` something else
 def scan' (init:a) (body:n->a->a) : n=>a = snd $ scan init \i x. dup (body i x)
@@ -416,18 +429,18 @@ def linspace (n:Type) (low:Float) (high:Float) : n=>Float =
   for i:n. low + IToF (ordinal i) * dx
 
 def transpose (x:n=>m=>Float) : m=>n=>Float = for i j. x.j.i
-def vdot (x:n=>Float) (y:n=>Float) : Float = fsum \i. x.i * y.i
+def vdot (x:n=>Float) (y:n=>Float) : Float = fsum \i:n. x.i * y.i
 
 -- matmul. Better symbol to use? `@`?
 (**) : (l=>m=>Float) -> (m=>n=>Float) -> (l=>n=>Float) = \x y.
   y' = transpose y
-  for i k. fsum \j. x.i.j * y'.k.j
+  for i:l k:n. fsum \j:m. x.i.j * y'.k.j
 
 (**.) : (n=>m=>Float) -> (m=>Float) -> (n=>Float) = \mat v. for i. vdot mat.i v
 (.**) : (m=>Float) -> (n=>m=>Float) -> (n=>Float) = flip (**.)
 
 def inner (x:n=>Float) (mat:n=>m=>Float) (y:m=>Float) : Float =
-  fsum \(i,j). x.i * mat.i.j * y.j
+  fsum \(i,j):(n&m). x.i * mat.i.j * y.j
 
 'Functions for working with the pseudorandom number generator
 
@@ -478,15 +491,15 @@ def min (_:Ord o) ?=> (x1: o) -> (x2: o) : o = minBy id x1 x2
 def max (_:Ord o) ?=> (x1: o) -> (x2: o) : o = maxBy id x1 x2
 
 def minimumBy (_:Ord o) ?=> (f:a->o) (xs:n=>a) : a =
-  reduce xs.(0@_) (minBy f) xs
+  reduce xs.(0@n) (minBy f) xs
 def maximumBy (_:Ord o) ?=> (f:a->o) (xs:n=>a) : a =
-  reduce xs.(0@_) (maxBy f) xs
+  reduce xs.(0@n) (maxBy f) xs
 
 def minimum (_:Ord o) ?=> (xs:n=>o) : o = minimumBy id xs
 def maximum (_:Ord o) ?=> (xs:n=>o) : o = maximumBy id xs
 
 def argmin (_:Ord o) ?=> (xs:n=>o) : n =
-  zeroth = (0@_, xs.(0@_))
+  zeroth = (0@n, xs.(0@n))
   compare = \(idx1, x1) (idx2, x2).
     select (x1 < x2) (idx1, x1) (idx2, x2)
   zipped = for i. (i, xs.i)
@@ -612,7 +625,7 @@ def tile1 (n : Type) ?-> (l : Type) ?-> (m : Type) ?->
 
 def logsumexp (x: n=>Float) : Float =
   m = maximum x
-  m + (log $ sum for i. exp (x.i - m))
+  m + (log $ sum for i:n. exp (x.i - m))
 
 def logsoftmax (x: n=>Float) : n=>Float =
   lse = logsumexp x
@@ -620,13 +633,13 @@ def logsoftmax (x: n=>Float) : n=>Float =
 
 def softmax (x: n=>Float) : n=>Float =
   m = maximum x
-  e =  for i. exp (x.i - m)
+  e =  for i:n. exp (x.i - m)
   s = sum e
   for i. e.i / s
 
 def evalpoly (_:VSpace v) ?=> (coefficients:n=>v) (x:Float) : v =
   -- Evaluate a polynomial at x.  Same as Numpy's polyval.
-  fold zero \i c. coefficients.i + x .* c
+  fold zero \i:n c. coefficients.i + x .* c
 
 'Length-erased lists
 
@@ -640,8 +653,8 @@ def (<>) (x:List a) (y:List a) : List a =
   AsList _ $ for i:(Fin nz).
     i' = ordinal i
     case i' < nx of
-      True  -> xs.(fromOrdinal _ i')
-      False -> ys.(fromOrdinal _ (i' - nx))
+      True  -> xs.i'
+      False -> ys.(i' - nx)
 
 'Isomorphisms
 

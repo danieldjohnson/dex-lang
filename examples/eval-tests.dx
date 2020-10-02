@@ -11,17 +11,17 @@
 
 :p
    x = iota (Fin 10)
-   sum (for i. x.i)
+   sum x
 > 45
 
 :p
    x = iota (Fin 3)
-   prod (for i. x.i + 1)
+   prod (for i:(Fin 3). x.i + 1)
 > 6
 
+def vdot' (n:Type)?-> : n=>Float -> n=>Float -> Float =
+     \x y. sum (for i:n. x.i * y.i * 2.0)
 :p
-   vdot' : n:Type ?-> n=>Float -> n=>Float -> Float =
-     \x y. sum (for i. x.i * y.i * 2.0)
    x = iota (Fin 3)
    y = map IToF x
    vdot' y y
@@ -30,8 +30,8 @@
 :p
    x = iota $ Fin 3
    y = iota $ Fin 4
-   z = for i j. IToF x.i * IToF y.j
-   sum (for i. sum z.i)
+   z = for i:(Fin 3) j:(Fin 4). IToF x.i * IToF y.j
+   sum (for i:(Fin 3). sum z.i)
 > 18.0
 
 -- :p randint (hash 0 0) 10
@@ -42,7 +42,7 @@ NArr = Fin 7
 
 arr = iota NArr
 
-:p for i:NArr. (iota _).i + (iota _).i
+:p for i:NArr. (iota NArr).i + (iota NArr).i
 > [0, 2, 4, 6, 8, 10, 12]
 
 :p sum for i:NArr. 1
@@ -56,7 +56,7 @@ fun = \y. sum (map IToF arr) + y
 :p arr
 > [0, 1, 2, 3, 4, 5, 6]
 
-:p fold 0 \i. (+) arr.i
+:p fold 0 \i:NArr. (+) arr.i
 > 21
 
 :p 6.0 - 10.0
@@ -132,7 +132,7 @@ s = 1.0
 
 :p
    xs = [2,1,0]
-   for i. xs.i + 10
+   for i:(Fin 3). xs.i + 10
 > [12, 11, 10]
 
 cumsumplus : n=>Float -> n=>Float =
@@ -190,7 +190,7 @@ nan = 0./0.
 N3 = Fin 3
 N4 = Fin 4
 
-mat = for i:N3 j:N4. (iota _).i + (10 * (iota _).j)
+mat = for i:N3 j:N4. (iota N3).i + (10 * (iota N4).j)
 
 -- :p sum for (i,j). mat.i.j
 -- > 192
@@ -239,13 +239,13 @@ litArr = [10, 5, 3]
 
 :p
    mat2 = for i:(Fin 4) j:(Fin 4) . ordinal i
-   tmp = for i. mat2.i.i
+   tmp = for i:(Fin 4). mat2.i.i
    tmp
 > [0, 1, 2, 3]
 
 :p
   x = [[0, 1], [2, 3]]
-  xt = for i j. x.j.i
+  xt = for i:(Fin 2) j:(Fin 2). x.j.i
   xt
 > [[0, 2], [1, 3]]
 
@@ -266,10 +266,10 @@ litArr = [10, 5, 3]
 :p 0@(Fin 1)
 > 0@(Fin 1)
 
-:p [1, 2, 3].(0@_)
+:p [1, 2, 3].0
 > 1
 
-:p [0].([asidx 0].(asidx 0))
+:p [0].([0].0)
 > 0
 
 :p select True 1 2
@@ -284,7 +284,7 @@ litArr = [10, 5, 3]
 :p select False [1,2,3] [10,20,30]
 > [10, 20, 30]
 
-:p [(1, (for i:(Fin 2) . 3))].(fromOrdinal _ 0)
+:p [(1, (for i:(Fin 2) . 3))].0
 > (1, [3, 3])
 
 :p (False && False, False && True, True && False, True && True)
@@ -463,7 +463,7 @@ litArr = [10, 5, 3]
 :p
   xs = [10.,20.]
   ys = [1.,2.,3.]
-  xys = for (i,j). xs.i + ys.j
+  xys = for (i,j):(Fin 2 & Fin 3). xs.i + ys.j
   sum xys
 > 102.0
 
@@ -471,15 +471,15 @@ litArr = [10, 5, 3]
   xs = [10.,20.]
   ys = [1.,2.,3.]
   zs = [1.]
-  xys = for (i,(j,k)). xs.i + ys.j + zs.k
+  xys = for (i,j,k):(Fin 2 & Fin 3 & Fin 1). xs.i + ys.j + zs.k
   sum xys
 > 108.0
 
 :p
   xs = [[1,2],[3,4]]
-  ys = for (i,j). xs.i.j
-  zs = for (i,j). ys.(i,j)
-  for i j. zs.(j,i)
+  ys = for (i,j):(Fin 2 & Fin 2). xs.i.j
+  zs = for (i,j):(Fin 2 & Fin 2). ys.(i,j)
+  for i:(Fin 2) j:(Fin 2). zs.(j,i)
 > [[1, 3], [2, 4]]
 
 :p argmin [1.0, 2.0, 0.4, 5.0]
@@ -542,8 +542,8 @@ def flatten ((w,b):(Weights n m & Biases n)): Params n m =
     {| biases  = i     |} -> b.i
 
 def unflatten (params:Params n m) : (Weights n m & Biases n) =
-  ( for i. for j. params.({| weights = (i,j)|})
-  , for i.        params.({| biases  = i    |}))
+  ( for i:n. for j:m. params.({| weights = (i,j)|}:{weights:(n&m) | biases:n})
+  , for i:n.          params.({| biases  = i    |}:{weights:(n&m) | biases:n}))
 
 :p unflatten (flatten (w, b)) == (w, b)
 > True
@@ -682,7 +682,7 @@ def newtonSolve (tol:Float) (f : Float -> Float) (x0:Float) : Float =
   fs = for i:(Fin 4).
     x = ordinal i
     \y. x + y
-  for i. fs.i (ordinal i)
+  for i:(Fin 4). fs.i (ordinal i)
 > [0, 2, 4, 6]
 
 :p
@@ -709,8 +709,8 @@ def newtonSolve (tol:Float) (f : Float -> Float) (x0:Float) : Float =
 -- add toAdd toAdd
 -- > [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
 
-arr2d = for i:(Fin 2). for j:(Fin 2). (iota _).(i,j)
-arr2d.(1@_)
+arr2d = for i:(Fin 2). for j:(Fin 2). (iota (Fin 2 & Fin 2)).(i,j)
+arr2d.1
 > [2, 3]
 
 :p
@@ -744,19 +744,19 @@ arr2d.(1@_)
 easy = [(-2.0), 3.0, 3.0, 0.1, 0.0]
 hard = [(-1000.0), 1000.0, 1000.0, 0.1, 0.0]
 
-:p logsumexp easy - (log $ sum for j. exp easy.j)
+:p logsumexp easy - (log $ sum for j:(Fin 5). exp easy.j)
 > 0.0
 
 :p sum $ softmax hard
 > 1.0
 
-:p all for i. ((softmax hard).i >= 0.0)
+:p all for i:(Fin 5). ((softmax hard).i >= 0.0)
 > True
 
-:p sum for i. exp $ (logsoftmax hard).i
+:p sum for i:(Fin 5). exp $ (logsoftmax hard).i
 > 0.9999709
 
-:p all for i. abs ((softmax hard).i - exp (logsoftmax hard).i) < 0.0001
+:p all for i:(Fin 5). abs ((softmax hard).i - exp (logsoftmax hard).i) < 0.0001
 > True
 
 :p evalpoly [2.0, 3.0, 4.0] 10.0

@@ -63,19 +63,17 @@ help make the errors more local.
 :t
    x = iota (Fin 10)
    y = iota (Fin 3)
-   IToF (sum for i. x.i) + IToF (sum for j. y.j)
+   IToF (sum x) + IToF (sum y)
 > Float32
 
 :t
    x = iota (Fin 10)
    y = iota (Fin 3)
-   sum for i. x.i + y.i
-> Type error:
-> Expected: (Fin 3)
->   Actual: (Fin 10)
+   sum for i:(Fin 3). x.i + y.i
+> Type error:Couldn't synthesize a class dictionary for: (IndexesInto (Fin 3) (Fin 10))
 >
->    sum for i. x.i + y.i
->                       ^
+>    sum for i:(Fin 3). x.i + y.i
+>                       ^^^^
 
 Narr = Fin 10
 
@@ -91,8 +89,8 @@ xr = map IToF arr
 
 :t
    f = \(x, y). x + 2.0 * y
-   z = for i. (xr.i, xr.i * xr.i)
-   sum (for i. f z.i)
+   z = for i:Narr. (xr.i, xr.i * xr.i)
+   sum (for i:Narr. f z.i)
 > Float32
 
 :t [1, 2, 3]

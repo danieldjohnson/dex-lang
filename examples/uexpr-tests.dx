@@ -209,7 +209,7 @@ def myOtherFst ((x, _):(a&b)) : a = x
 > 3.0
 
 :p
-  xs = fanout _ 1.0
+  xs = fanout (Fin 3) 1.0
   for i:(Fin 3). xs.i + xs.i
 > [2.0, 2.0, 2.0]
 

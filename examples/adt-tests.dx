@@ -44,7 +44,7 @@ zz = MkMyPair 1 (MkMyPair True 2.3)
 
 :p
   tabOfPairs = for i:(Fin 3). MkMyPair (ordinal i) (ordinal i + 1)
-  for i.
+  for i:(Fin 3).
    case tabOfPairs.i of
      -- TODO: investigate shadowing bug if we call these a and b
      MkMyPair x y -> (x + y, y)
@@ -79,30 +79,30 @@ myTab = [MyLeft 1, MyRight 3.5, MyLeft 123, MyLeft 456]
 :p myTab
 > [(MyLeft 1), (MyRight 3.5), (MyLeft 123), (MyLeft 456)]
 
-:p for i. case myTab.i of
+:p for i:(Fin 4). case myTab.i of
   MyLeft  val -> val
   MyRight val -> FToI $ floor val
 > [1, 3, 123, 456]
 
 -- check order independence
-:p for i. case myTab.i of
+:p for i:(Fin 4). case myTab.i of
   MyRight val -> FToI $ floor val
   MyLeft  val -> val
 > [1, 3, 123, 456]
 
 -- test non-exhaustive patterns
-:p for i. case myTab.i of
+:p for i:(Fin 4). case myTab.i of
   MyLeft  val -> val
 > Runtime error
 
-:p for i. case myTab.i of
+:p for i:(Fin 4). case myTab.i of
   MyLeft  val -> val
   MyRight _   -> todo
 > Runtime error
 
 :p
   snd $ withAccum \ref.
-    for i. case myTab.i of
+    for i:(Fin 4). case myTab.i of
       MyLeft tmp -> ()
       MyRight val -> ref += 1.0 + val
 > 4.5
@@ -110,7 +110,7 @@ myTab = [MyLeft 1, MyRight 3.5, MyLeft 123, MyLeft 456]
 :p
   -- check that the order of the case alternatives doesn't matter
   snd $ withAccum \ref.
-    for i. case myTab.i of
+    for i:(Fin 4). case myTab.i of
       MyRight val -> ref += 1.0 + val
       MyLeft tmp -> ()
 > 4.5
@@ -128,7 +128,7 @@ threeCaseTab : (Fin 4)=>ThreeCases =
 
 :p
   snd $ withAccum \ref.
-    for i. case threeCaseTab.i of
+    for i:(Fin 4). case threeCaseTab.i of
       TheEmptyCase    -> ref += 1000.0
       ThePairCase x y -> ref +=  100.0 + y + IToF x
       TheIntCase x    -> ref +=   10.0 + IToF (x * 2)
@@ -148,14 +148,14 @@ data MyIntish = MkIntish Int
 
 :p
   pairs = [MkMyPair 2 z,  MkMyPair 2 (MkMyPair 4 3.4)]
-  for i.
+  for i:(Fin 2).
     (MkMyPair x (MkMyPair y z)) = pairs.i
     x + y + (FToI $ floor z)
 > [5, 9]
 
 :p
   xs = [MyLeft 1.0, MyLeft 2.0, MyRight (MkMyPair 3 4.0)]
-  for i. case xs.i of
+  for i:(Fin 3). case xs.i of
     MyLeft x -> (FToI $ floor x)
     MyRight (MkMyPair x y) -> x + (FToI $ floor y)
 > [1, 2, 7]
