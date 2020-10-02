@@ -93,7 +93,7 @@ Syntax for records, variants, and their types.
 > 89 | :p {a:Int & b:Float | c:Int }
 >    |                     ^
 > unexpected '|'
-> expecting "..", "..<", "<..", "<..<", "=>", "{|", '$', '&', '.', ':', '}', arrow, backquoted name, expression, or infix operator
+> expecting "..", "..<", "<..", "<..<", "=>", "{|", '$', '&', ':', '}', arrow, backquoted name, expression, or infix operator
 
 :p {a:Int,}
 
@@ -102,7 +102,7 @@ Syntax for records, variants, and their types.
 > 98 | :p {a:Int,}
 >    |          ^
 > unexpected ','
-> expecting "..", "..<", "<..", "<..<", "=>", "{|", '$', '&', ''', '.', ':', '_', '|', '}', alphanumeric character, arrow, backquoted name, expression, or infix operator
+> expecting "..", "..<", "<..", "<..<", "=>", "{|", '$', '&', ''', ':', '_', '|', '}', alphanumeric character, arrow, backquoted name, expression, or infix operator
 
 :p {|3}
 

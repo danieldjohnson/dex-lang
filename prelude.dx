@@ -19,6 +19,8 @@ Float32 = %Float32
 Int = Int32
 Float = Float32
 
+def (.) (tab:n=>a) (x:n) : a = %tableApp tab x
+
 def internalCast (b:Type) (x:a) : b = %cast b x
 
 def F64ToF (x : Float64) : Float   = internalCast _ x

@@ -555,6 +555,7 @@ uPrim = withSrc $ do
       retTy <- baseType
       args <- some lowerName
       return $ UPrimExpr $ OpExpr $ FFICall f retTy args
+    "tableApp" -> UApp TabArrow <$> leafExpr <*> leafExpr
     _ -> case strToPrimName s of
       Just prim -> UPrimExpr <$> traverse (const lowerName) prim
       Nothing -> fail $ "Unrecognized primitive: " ++ s
@@ -747,7 +748,7 @@ fallBackTo optionA optionB = do
 -- literal symbols here must only use chars from `symChars`
 ops :: [[Operator Parser UExpr]]
 ops =
-  [ [InfixL $ sym "." $> mkGenApp TabArrow, symOp "!"]
+  [ [symOp ".", symOp "!"]
   , [InfixL $ sc $> mkApp]
   , [prefixNegOp]
   , [annotatedExpr]
@@ -809,9 +810,6 @@ prefixNegOp = Prefix $ label "negation" $ do
 binApp :: Name -> SrcPos -> UExpr -> UExpr -> UExpr
 binApp f pos x y = (f' `mkApp` x) `mkApp` y
   where f' = WithSrc (Just pos) $ UVar (f:>())
-
-mkGenApp :: UArrow -> UExpr -> UExpr -> UExpr
-mkGenApp arr f x = joinSrc f x $ UApp arr f x
 
 mkApp :: UExpr -> UExpr -> UExpr
 mkApp f x = joinSrc f x $ UApp (PlainArrow ()) f x
