@@ -299,7 +299,7 @@ data PrimCon e =
         Lit LitVal
       | PairCon e e
       | UnitCon
-      | ClassDictHole SrcCtx e   -- Only used during type inference
+      | ClassDictHole SrcCtx e   -- Unused.
       | SumAsProd e e [[e]] -- type, tag, payload (only used during Imp lowering)
       -- These are just newtype wrappers. TODO: use ADTs instead
       | IntRangeVal   e e e

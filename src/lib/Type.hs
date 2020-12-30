@@ -432,7 +432,7 @@ instance CoreVariant (PrimOp a) where
 
 instance CoreVariant (PrimCon a) where
   checkVariant e = case e of
-    ClassDictHole _ _ -> goneBy Core
+    ClassDictHole _ _ -> neverAllowed
     _ -> alwaysAllowed
 
 instance CoreVariant (PrimHof a) where
