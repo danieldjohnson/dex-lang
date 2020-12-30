@@ -29,12 +29,11 @@ import Type
 import PPrint
 import Cat
 import Util
-
-import Debug.Trace
+import Control.Monad.Writer.Class (MonadWriter)
 
 -- === type inference ===
 
-type UInferM = ReaderT SubstEnv (ReaderT SrcCtx (EmbedT (SolverT (Either Err))))
+type UInferM = ReaderT SubstEnv (ReaderT SrcCtx (EmbedT (SolverT ExceptWithOutputs)))
 
 type SigmaType = Type  -- may     start with an implicit lambda
 type RhoType   = Type  -- doesn't start with an implicit lambda
@@ -49,20 +48,20 @@ pattern Check t <-
 
 {-# COMPLETE Infer, Check #-}
 
-inferModule :: TopEnv -> UModule -> Except Module
+inferModule :: TopEnv -> UModule -> ExceptWithOutputs Module
 inferModule scope (UModule decls) = do
-  ((), (bindings, decls')) <- runUInferM mempty scope $
-                                mapM_ (inferUDecl True) decls
-  let bindings' = envFilter bindings $ \(_, b) -> case b of
-                    DataBoundTypeCon _   -> True
-                    DataBoundDataCon _ _ -> True
-                    _ -> False
-  return $ Module Core decls' bindings'
-
-runUInferM :: (Subst a, Pretty a)
-           => SubstEnv -> Scope -> UInferM a -> Except (a, (Scope, Nest Decl))
-runUInferM env scope m = runSolverT $
-  runEmbedT (runReaderT (runReaderT m env) Nothing) scope
+  let infer = mapM_ (inferUDecl True) decls
+  res <- runSolverT $ do
+    res <- runEmbedT (runReaderT (runReaderT infer mempty) Nothing) scope
+    logInfo TypePass $ pprint $ asModule Typed res
+    return res
+  return $ asModule Core res
+  where asModule variant ((), (bindings, decls')) =
+          let bindings' = envFilter bindings $ \(_, b) -> case b of
+                            DataBoundTypeCon _   -> True
+                            DataBoundDataCon _ _ -> True
+                            _ -> False
+          in Module variant decls' bindings'
 
 checkSigma :: UExpr -> (Type -> RequiredTy Type) -> SigmaType -> UInferM Atom
 checkSigma expr reqCon sTy = case sTy of
@@ -675,7 +674,7 @@ instance Monoid SolverEnv where
   mempty = SolverEnv mempty mempty mempty
   mappend = (<>)
 
-runSolverT :: (MonadError Err m, Subst a, Pretty a)
+runSolverT :: (MonadError Err m, MonadWriter [Output] m, Subst a, Pretty a)
            => CatT SolverEnv m a -> m a
 runSolverT m = fmap fst $ flip runCatT mempty $ do
   ans <- m
@@ -696,7 +695,8 @@ withZonkedContext ans m = catchError m $ \(Err e p s) -> do
   throwError $ Err e p (s ++ "\n\nWhile solving:\n" ++ pprint ans')
 
 -- Resolve any deferred typeclass constraints.
-resolveConstraints :: (MonadError Err m, MonadCat SolverEnv m) => m ()
+resolveConstraints :: ( MonadError Err m, MonadCat SolverEnv m
+                      , MonadWriter [Output] m) => m ()
 resolveConstraints = go 0 where
   go i = do
     dicts <- looks unsolvedDicts
@@ -798,7 +798,7 @@ instance Monoid SynthConfidence where
 
 -- Try to synthesize an instance dictionary. If the results depend on unknown
 -- inference variables, this may return Nothing.
-trySynth :: (MonadCat SolverEnv m, MonadError Err m)
+trySynth :: (MonadCat SolverEnv m, MonadError Err m, MonadWriter [Output] m)
          => Scope -> SrcCtx -> Type -> m (Maybe Atom)
 trySynth scope ctx ty = addSrcContext ctx $ do
   scope' <- zonk scope
@@ -824,7 +824,8 @@ trySynth scope ctx ty = addSrcContext ctx $ do
 
 -- Try to find a dictionary, trying lambda-bound dictionaries before global
 -- instances.
-synthInScope :: (MonadCat SolverEnv m, MonadEmbed m, MonadError Err m)
+synthInScope :: ( MonadCat SolverEnv m, MonadEmbed m, MonadError Err m
+                , MonadWriter [Output] m)
              => SrcCtx -> Type -> m SynthAttempt
 synthInScope ctx ty = do
   scope <- getScope
@@ -876,11 +877,13 @@ getLamBoundDicts scope = do
   (v, LamBound ClassArrow) <- getBindings scope
   return v
 
-synthWithOptions :: (MonadCat SolverEnv m, MonadEmbed m, MonadError Err m)
+synthWithOptions :: ( MonadCat SolverEnv m, MonadEmbed m, MonadError Err m
+                    , MonadWriter [Output] m)
                  => SrcCtx -> Type -> [(Name, m Atom)] -> m SynthAttempt
 synthWithOptions ctx ty = foldMapM (synthOption ctx ty)
 
-synthOption :: (MonadCat SolverEnv m, MonadEmbed m, MonadError Err m)
+synthOption :: ( MonadCat SolverEnv m, MonadEmbed m, MonadError Err m
+               , MonadWriter [Output] m)
                => SrcCtx -> Type -> (Name, m Atom) -> m SynthAttempt
 synthOption ctx ty (name, dict) = do
   -- Locally unify and construct the dictionary, ignoring unification errors.
@@ -895,7 +898,7 @@ synthOption ctx ty (name, dict) = do
       -- be sure this will be a match.
       let sure = null (unsolved currentEnv `envIntersect` solverSub localEnv)
       if sure then do
-        traceM $
+        logInfo SynthPass $
           "Found confident solution to " <> pprint ty
           <> " using " <> pprint name <> "."
           <> "\n  Solution:" <> pprint block
@@ -903,7 +906,7 @@ synthOption ctx ty (name, dict) = do
         let thunk = Lam $ makeAbs (Ignore UnitTy) (PureArrow, block) 
         return ([(name, thunk, localEnv)], SynthFoundAll)
       else do
-        traceM $ "Found possible future solution to " <> pprint ty <> " using " <> pprint name
+        logInfo SynthPass $ "Found possible future solution to " <> pprint ty <> " using " <> pprint name
         return ([], SynthCouldFindMore)
 
 instantiateAndCheck :: (MonadCat SolverEnv m, MonadEmbed m, MonadError Err m)

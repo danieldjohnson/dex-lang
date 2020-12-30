@@ -52,7 +52,8 @@ import PPrint
 import Util (bindM2, scanM, restructure)
 
 newtype EmbedT m a = EmbedT (ReaderT EmbedEnvR (CatT EmbedEnvC m) a)
-  deriving (Functor, Applicative, Monad, MonadIO, MonadFail, Alternative)
+  deriving ( Functor, Applicative, Monad, MonadIO, MonadFail, MonadWriter w
+           , Alternative)
 
 type Embed = EmbedT Identity
 type EmbedEnv = (EmbedEnvR, EmbedEnvC)
