@@ -204,7 +204,12 @@ def passthrough (eff:Effects) ?-> (f:(a -> {|eff} b)) (x:a) : {|eff} b = f x
   myId = fst (\x. x, 2)
   f : a:Type -> a -> a = \a. \x. myId x
   f Int 1
-> Type error:Leaked type variable: a:Type
+> Type error:Leaked type variable `a:Type` in value `a` of inference variable `?4`
+>
+> While checking for leaks in
+> (\x:a. myId6 x)
+>
+> Unsolved variables: (?4 @> Type)
 >
 >   f : a:Type -> a -> a = \a. \x. myId x
 >                           ^^^^^^^^^^^^^
@@ -314,6 +319,11 @@ def bug (n : Type) : Unit =
     for i:(w..). ()
   ()
 > Type error:Leaked local variable `w` in result type ((w..) => Unit)
+>
+> While checking for leaks in
+> pat
+>
+> Unsolved variables: ()
 >
 >   for w':n.
 >   ^^^^

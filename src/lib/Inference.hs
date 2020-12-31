@@ -51,13 +51,13 @@ pattern Check t <-
 inferModule :: TopEnv -> UModule -> ExceptWithOutputs Module
 inferModule scope (UModule decls) = do
   let infer = mapM_ (inferUDecl True) decls
-  res <- runSolverT $ do
-    res <- runEmbedT (runReaderT (runReaderT infer mempty) Nothing) scope
+  res <- runSolverT scope $ do
+    res <- zonk =<< runEmbedT (runReaderT (runReaderT infer mempty) Nothing) scope
     env <- look
+    unsolvedVars <- zonk $ unsolved env
     logInfo TypePass $
       pprint (asModule Typed res)
-      ++ "\n\nUnsolved variables: " ++ pprint (unsolved env)
-      ++ "\nSolved variables: " ++ pprint (solverSub env)
+      ++ "\n\nUnsolved variables: " ++ pprint unsolvedVars
     return res
   return $ asModule Core res
   where asModule variant ((), (bindings, decls')) =
@@ -656,6 +656,31 @@ addSrcContext' pos m = do
 getSrcCtx :: UInferM SrcCtx
 getSrcCtx = lift ask
 
+checkLeaks :: (HasType a, Subst a) => [Var] -> UInferM a -> UInferM a
+checkLeaks tvs m = do
+  scope <- getScope
+  (ans, env) <- scoped $ solveLocal m
+  withSolverContext "While checking for leaks in" ans $ do
+    let resultTypeLeaks = filter (\case (Name InferenceName _ _) -> False; _ -> True) $
+                            envNames $ freeVars (getType ans) `envDiff` scope
+    unless (null resultTypeLeaks) $
+      throw TypeErr $ "Leaked local variable `" ++ pprint (head resultTypeLeaks) ++
+                      "` in result type " ++ pprint (getType ans)
+    forM_ (envPairs $ solverSub env) $ \(v, ty) ->
+      forM_ tvs $ \tv ->
+        throwIf (tv `occursIn` ty) TypeErr $
+          "Leaked type variable `" ++ pprint tv
+          ++ "` in value `" ++ pprint ty
+          ++ "` of inference variable `" ++ pprint v ++ "`"
+    forM_ (envPairs $ solverVars env) $ \(v, ty) ->
+      forM_ tvs $ \tv ->
+        throwIf (tv `occursIn` ty) TypeErr $
+          "Leaked type variable `" ++ pprint tv
+          ++ "` in type `" ++ pprint ty
+          ++ "` of inference variable `" ++ pprint v ++ "`"
+    extend env
+    return ans
+
 -- === constraint solver ===
 
 data SolverEnv = SolverEnv
@@ -664,42 +689,51 @@ data SolverEnv = SolverEnv
                           , Type    -- Type of dictionary to synthesize.
                           , [Type]) -- Locally ClassArrow-bound dictionaries.
   , solverSub  :: Env Type          -- Substitutions for solved vars.
+  , solverScope :: Scope            -- Scope to look for instances. Not modified.
   }
 type SolverT m = CatT SolverEnv m
 
 instance Semigroup SolverEnv where
   -- TODO: as an optimization, don't do the subst when sub2 is empty
   -- TODO: make concatenation more efficient by maintaining a reverse-lookup map
-  SolverEnv scope1 dv1 sub1 <> SolverEnv scope2 dv2 sub2 =
-    SolverEnv (scope1 <> scope2) (dv1 <> dv2) (sub1' <> sub2)
+  SolverEnv scope1 dv1 sub1 sc1 <> SolverEnv scope2 dv2 sub2 sc2 =
+    SolverEnv (scope1 <> scope2) (dv1 <> dv2) (sub1' <> sub2) (sc1 <> sc2)
     where sub1' = fmap (scopelessSubst sub2) sub1
 
 instance Monoid SolverEnv where
-  mempty = SolverEnv mempty mempty mempty
+  mempty = SolverEnv mempty mempty mempty mempty
   mappend = (<>)
 
 runSolverT :: ( MonadError Err m, MonadWriter [Output] m, MonadFail m
               , Subst a, Pretty a)
-           => CatT SolverEnv m a -> m a
-runSolverT m = fmap fst $ flip runCatT mempty $ do
+           => Scope -> CatT SolverEnv m a -> m a
+runSolverT scope m = fmap fst $ flip runCatT mempty{solverScope=scope} $ do
   ans <- m
-  withZonkedContext ans $ do
+  withSolverContext "While solving constraints for:" ans $ do
     -- Resolve all remaining constraints.
     resolveConstraints
     applyDefaults
     -- Make sure there are no ambiguous type variables.
     ans' <- zonk ans
-    vs <- looks $ envNames . unsolved
+    env <- look
+    zonkedDicts <- mapM (\(_, _, ty) -> zonk ty) $ unsolvedDicts env
+    throwIf (not (null zonkedDicts)) TypeErr  $
+      "Got stuck solving typeclass dictionaries:\n" ++ pprint zonkedDicts
+    let vs = envNames $ unsolved env
     throwIf (not (null vs)) TypeErr $ "Ambiguous type variables: " ++ pprint vs
     return ans'
 
-withZonkedContext :: (MonadError Err m, Subst a, Pretty a, MonadCat SolverEnv m)
-                  => a -> m b -> m b
-withZonkedContext ans m = catchError m $ \(Err e p s) -> do
+withSolverContext :: (MonadError Err m, Subst a, Pretty a, MonadCat SolverEnv m)
+                  => String -> a -> m b -> m b
+withSolverContext msg ans m = catchError m $ \(Err e p s) -> do
   ans' <- zonk ans
-  throwError $ Err e p (s ++ "\n\nWhile solving:\n" ++ pprint ans')
+  env <- look
+  unsolvedVars <- zonk $ unsolved env
+  throwError $ Err e p $ s ++ "\n\n" ++ msg ++ "\n" ++ pprint ans'
+    ++ "\n\nUnsolved variables: " ++ pprint unsolvedVars
 
--- Resolve any deferred typeclass constraints.
+-- Try to resolve any deferred typeclass constraints, stopping when no more
+-- progress can be made.
 resolveConstraints :: ( MonadError Err m, MonadCat SolverEnv m
                       , MonadWriter [Output] m, MonadFail m) => m ()
 resolveConstraints = go 0 where
@@ -714,17 +748,8 @@ resolveConstraints = go 0 where
         case soln of
           Just dict -> bindQ (v:>()) dict >> return True
           Nothing -> return False
-      -- If we made no progress, throw an error.
-      unless (or solved) throwResolutionError
-      -- Try solving again.
-      go (i + 1)
-  throwResolutionError = do
-    env <- look
-    zonkedDicts <- mapM (\(_, _, ty) -> zonk ty) $ unsolvedDicts env
-    throw TypeErr  $
-      "Got stuck solving typeclass dictionaries:\n" ++ pprint zonkedDicts
-      ++ "\n\nUnsolveable type variables:\n"
-      ++ pprint (unsolved env `envDiff` zonkedDicts)
+      -- If we made no progress, stop.
+      when (or solved) $ go (i + 1)
   throwMaxItersError = do
     env <- look
     zonkedDicts <- mapM (\(_, _, ty) -> zonk ty) $ unsolvedDicts env
@@ -814,8 +839,9 @@ trySynth :: ( MonadCat SolverEnv m, MonadError Err m, MonadWriter [Output] m
 trySynth ctx reqTy haveTys = addSrcContext ctx $ do
   reqTy' <- zonk reqTy
   haveTys' <- zonk haveTys
-  -- Run in a local scope.
-  (result, (_, decls)) <- runEmbedT (synthInScope ctx reqTy' haveTys') mempty
+  scope <- looks solverScope
+  -- Run in a local embed to make synthesis simpler.
+  (result, (_, decls)) <- runEmbedT (synthInEmbed ctx reqTy' haveTys') scope
   throwIf (not $ null decls) CompilerErr "Unexpected decls in synthWithOptions"
   case result of
     (solutions@(_:_:_), confidence) -> throw TypeErr $
@@ -827,7 +853,10 @@ trySynth ctx reqTy haveTys = addSrcContext ctx $ do
           SynthFoundAll -> ""
           SynthCouldFindMore -> "\n(and possibly others after solving for "
                                 <> "remaining type variables)"
-    (_, SynthCouldFindMore) -> return Nothing
+    (_, SynthCouldFindMore) -> do
+      logInfo SynthPass $ "Deferring solution of "
+        <> pprint reqTy' <> " due to currently-unknown type variables"
+      return Nothing
     ([(_, dict, env)], SynthFoundAll) ->
       extend env >> return (Just dict)
     ([], SynthFoundAll) -> throw TypeErr $
@@ -835,10 +864,10 @@ trySynth ctx reqTy haveTys = addSrcContext ctx $ do
 
 -- Try to find a dictionary, trying lambda-bound dictionaries before global
 -- instances.
-synthInScope :: ( MonadCat SolverEnv m, MonadEmbed m, MonadError Err m
+synthInEmbed :: ( MonadCat SolverEnv m, MonadEmbed m, MonadError Err m
                 , MonadWriter [Output] m, MonadFail m)
              => SrcCtx -> Type -> [Type] -> m SynthAttempt
-synthInScope ctx reqTy haveTys = do
+synthInEmbed ctx reqTy haveTys = do
   scope <- getScope
   let haveArgTy = RecordTy $ NoExt $ Unlabeled haveTys
   -- first, try to use one of the class dictionaries we are passed
@@ -904,14 +933,11 @@ synthOption :: ( MonadCat SolverEnv m, MonadEmbed m, MonadError Err m
                => SrcCtx -> Type -> Type -> (String, Atom -> m Atom) -> m SynthAttempt
 synthOption ctx reqTy haveTy (name, makeDict) = do
   -- Locally unify and construct the dictionary, ignoring unification errors.
-  let scopedSolve = scoped $ buildLam (Ignore haveTy) PureArrow $ \have ->
-                      zonk =<< instantiateAndCheck ctx reqTy =<< makeDict have
+  let scopedSolve = scoped $ zonk =<< buildLam (Ignore haveTy) PureArrow
+                      (instantiateAndCheck ctx reqTy <=< makeDict)
   res <- (Right <$> scopedSolve) `catchError` (return . Left)
   case res of
-    Left err -> do
-      logInfo SynthPass $ "Couldn't solve " <> pprint reqTy
-          <> " using " <> name <> ":\n" <> pprint err
-      return ([], SynthFoundAll)
+    Left _ -> return ([], SynthFoundAll)
     Right (atom, localEnv) -> do
       currentEnv <- look
       -- Did we bind any type variables in the requested type? If so, we can't
@@ -922,13 +948,9 @@ synthOption ctx reqTy haveTy (name, makeDict) = do
           "Found solution to " <> pprint reqTy
           <> " using " <> name <> "."
           <> "\n  Solution:" <> pprint atom
-          <> "\n  New inference variables:" <> pprint (solverVars localEnv)
+          <> "\n  New inference variables:" <> pprint (unsolved localEnv)
         return ([(name, atom, localEnv)], SynthFoundAll)
-      else do
-        logInfo SynthPass $
-          "Found possible future solution to " <> pprint reqTy <>
-          " using " <> name <> " (depending on unsolved type variables)"
-        return ([], SynthCouldFindMore)
+      else return ([], SynthCouldFindMore)
 
 instantiateAndCheck :: (MonadCat SolverEnv m, MonadEmbed m, MonadError Err m)
                     => SrcCtx -> Type -> Atom -> m Atom
@@ -1055,38 +1077,25 @@ renameForPrinting x = (scopelessSubst substEnv x, newNames)
     substEnv = fold $ zipWith (\v v' -> v@>Var v') infVars newNames
     nameList = map (:[]) ['a'..'z'] ++ map show [(0::Int)..]
 
-solveLocal :: (MonadCat SolverEnv m, MonadEmbed m, Subst a) => m a -> m a
+solveLocal :: ( MonadCat SolverEnv m, MonadEmbed m, MonadError Err m
+              , MonadWriter [Output] m, MonadFail m, Subst a, Pretty a) => m a -> m a
 solveLocal m = do
   (ans, env@SolverEnv{solverSub=sub, solverVars=freshVars}) <- scoped $ do
     -- This might get expensive. TODO: revisit once we can measure performance.
-    (ans, embedEnv) <- zonk =<< embedScoped m
+    let run = do
+          ans <- m
+          withSolverContext "While locally solving constraints for"
+            ans resolveConstraints
+          return ans
+    (ans, embedEnv) <- zonk =<< embedScoped run
     embedExtend embedEnv
     return ans
-  extend $ SolverEnv{ solverVars=scopelessSubst sub $ unsolved env
-                    , wantedDictVars=substUnsolvedDicts sub $ unsolvedDicts env
-                    , solverSub=sub `envDiff` freshVars}
+  extend $ mempty{ solverVars=scopelessSubst sub $ unsolved env
+                 , wantedDictVars=substUnsolvedDicts sub $ unsolvedDicts env
+                 , solverSub=sub `envDiff` freshVars}
   return ans
   where substUnsolvedDicts sub env = flip fmap env $ \(ctx, reqTy, haveTys) ->
           (ctx, scopelessSubst sub reqTy, scopelessSubst sub haveTys)
-
-checkLeaks :: ( MonadCat SolverEnv m, MonadEmbed m, MonadError Err m
-              , HasType a, Subst a) => [Var] -> m a -> m a
-checkLeaks tvs m = do
-  scope <- getScope
-  (ans, env) <- scoped $ solveLocal m
-  let resultTypeLeaks = filter (\case (Name InferenceName _ _) -> False; _ -> True) $
-                          envNames $ freeVars (getType ans) `envDiff` scope
-  unless (null resultTypeLeaks) $
-    throw TypeErr $ "Leaked local variable `" ++ pprint (head resultTypeLeaks) ++
-                    "` in result type " ++ pprint (getType ans)
-  forM_ (envPairs $ solverSub env) $ \(v, ty) ->
-    forM_ tvs $ \tv ->
-      throwIf (tv `occursIn` ty) TypeErr $
-        "Leaked type variable `" ++ pprint tv
-        ++ "` in value `" ++ pprint ty
-        ++ "` of inference variable `" ++ pprint v ++ "`"
-  extend env
-  return ans
 
 typeReduceScoped :: MonadEmbed m => m Atom -> m (Maybe Atom)
 typeReduceScoped m = do
