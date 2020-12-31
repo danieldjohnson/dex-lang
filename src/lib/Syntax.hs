@@ -35,7 +35,8 @@ module Syntax (
     SrcCtx, Result (..), Output (..), OutFormat (..),
     Err (..), ErrType (..), Except, ExceptWithOutputs, runExceptWithOutputs,
     throw, throwIf, modifyErr, addContext, addSrcContext, catchIOExcept,
-    liftEitherIO, liftExceptWithOutputsIO, logInfo, (-->), (--@), (==>),
+    liftEitherIO, liftExceptWithOutputsIO, exceptNoOutputs, logInfo,
+    (-->), (--@), (==>),
     boundUVars, PassName (..), boundVars, renamingSubst, bindingsAsVars,
     freeVars, freeUVars, Subst, HasVars, BindsVars, Ptr, PtrType,
     AddressSpace (..), showPrimName, strToPrimName, primNameToStr,
@@ -701,6 +702,10 @@ instance MonadFail ExceptWithOutputs where
 
 runExceptWithOutputs :: ExceptWithOutputs a -> (Either Err a, [Output])
 runExceptWithOutputs (ExceptWithOutputs m) = runWriter $ runExceptT m
+
+exceptNoOutputs :: Except a -> ExceptWithOutputs a
+exceptNoOutputs (Right x) = return x
+exceptNoOutputs (Left err) = throwError err
 
 liftExceptWithOutputsIO :: MonadIO m
                         => (Output -> m ()) -> ExceptWithOutputs a -> m a

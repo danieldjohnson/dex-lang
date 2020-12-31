@@ -77,7 +77,8 @@ simplifyDecls (Nest decl rest) = do
 
 simplifyDecl :: Decl -> SimplifyM SubstEnv
 simplifyDecl (Let NoInlineLet (Bind (name:>_)) expr) = do
-  x <- simplifyStandalone expr
+  expr' <- substEmbedR expr
+  x <- simplifyStandalone expr'
   emitTo name NoInlineLet (Atom x) $> mempty
 simplifyDecl (Let ann b expr) = do
   x <- simplifyExpr expr

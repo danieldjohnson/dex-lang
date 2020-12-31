@@ -234,9 +234,19 @@ g2 : a -> a = \x. idiv x x
 > Type error:Couldn't synthesize a class dictionary for: (Integral a)
 >
 > While locally solving constraints for
-> tmp4
+> ( tmp4
+> , ( ( tmp @> (((Integral a) ?=> a -> a -> a), (idiv a))
+> , tmp1 @> ((Integral a), (?2 {,}))
+> , tmp2 @> ((a -> a -> a), (tmp tmp1))
+> , tmp3 @> ((a -> a), (tmp2 x))
+> , tmp4 @> (a, (tmp3 x)) )
+> , [ tmp:((Integral a) ?=> a -> a -> a) = idiv a
+>   , tmp1:(Integral a) = ?2 {,}
+>   , tmp2:(a -> a -> a) = tmp tmp1
+>   , tmp3:(a -> a) = tmp2 x
+>   , tmp4:a = tmp3 x ] ) )
 >
-> Unsolved variables: (?2 @> ({ &} -> Integral a))
+> Unsolved variables: (?2 @> ({ &} ?=> Integral a))
 >
 > g2 : a -> a = \x. idiv x x
 >                   ^^^^^
@@ -250,9 +260,17 @@ fun : a -> a = \x. sin x
 > Type error:Couldn't synthesize a class dictionary for: (Floating a)
 >
 > While locally solving constraints for
-> tmp3
+> ( tmp3
+> , ( ( tmp @> (((Floating a) ?=> a -> a), (sin a))
+> , tmp1 @> ((Floating a), (?2 {,}))
+> , tmp2 @> ((a -> a), (tmp tmp1))
+> , tmp3 @> (a, (tmp2 x)) )
+> , [ tmp:((Floating a) ?=> a -> a) = sin a
+>   , tmp1:(Floating a) = ?2 {,}
+>   , tmp2:(a -> a) = tmp tmp1
+>   , tmp3:a = tmp2 x ] ) )
 >
-> Unsolved variables: (?2 @> ({ &} -> Floating a))
+> Unsolved variables: (?2 @> ({ &} ?=> Floating a))
 >
 > fun : a -> a = \x. sin x
 >                    ^^^^
@@ -340,9 +358,9 @@ bad_range : Int = (1@Fin 3)..(2@_)
 > Type error:Couldn't synthesize a class dictionary for: (Eq (Int32 -> Int32))
 >
 > While locally solving constraints for
-> x
+> (x, ((), []))
 >
-> Unsolved variables: (?1 @> ({ &} -> Eq (Int32 -> Int32)))
+> Unsolved variables: (?1 @> ({ &} ?=> Eq (Int32 -> Int32)))
 >
 > :p (\x:Int. x) == (\x:Int. x)
 >                ^^^

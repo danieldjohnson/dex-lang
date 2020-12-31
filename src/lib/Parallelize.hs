@@ -110,7 +110,7 @@ buildParallelBlock ablock@(ABlock decls result) = do
     -- emitting a for in that case would only gather them into another table.
     Emit -> case decls of
       Empty -> reduce =<< unflattenConsTab lbs =<< emitLoops (flip buildLam TabArrow) ablock
-        where reduce = lift . traverseAtom appReduceTraversalDef
+        where reduce = lift . traverseAtom (appReduceTraversalDef (== TabArrow))
       _     -> unflattenConsTab lbs =<< emitLoops (buildForAnn ParallelFor) ablock
     Split prologue (arrb, loop@(Abs i lbody)) epilogue -> do
       prologueApps <- case prologue of
@@ -201,7 +201,8 @@ emitLoops buildPureLoop (ABlock decls result) = do
           ctxEnv <- flip traverseNames dapps $ \_ (arr, idx) ->
             -- XXX: arr is namespaced in the new program
             foldM appTryReduce arr =<< substEmbedR idx
-          extendR ctxEnv $ evalBlockE appReduceTraversalDef $ Block decls $ Atom result
+          extendR ctxEnv $ evalBlockE (appReduceTraversalDef (== TabArrow))
+            $ Block decls $ Atom result
   lift $ case null refs of
     True -> buildPureLoop (Bind $ "pari" :> iterTy) buildBody
     False -> do

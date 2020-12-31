@@ -589,21 +589,23 @@ substTraversalDef = ( traverseDecl substTraversalDef
                     , traverseAtom substTraversalDef
                     )
 
-appReduceTraversalDef :: (MonadEmbed m, MonadReader SubstEnv m) => TraversalDef m
-appReduceTraversalDef = ( traverseDecl appReduceTraversalDef
-                        , reduceAppExpr
-                        , traverseAtom appReduceTraversalDef
-                        )
+appReduceTraversalDef :: (MonadEmbed m, MonadReader SubstEnv m)
+                      => (Arrow -> Bool) -> TraversalDef m
+appReduceTraversalDef shouldReduce = ( traverseDecl recur
+                                     , reduceAppExpr
+                                     , traverseAtom recur
+                                     )
   where
+    recur = appReduceTraversalDef shouldReduce
     reduceAppExpr expr = case expr of
       App f' x' -> do
-        f <- traverseAtom appReduceTraversalDef f'
-        x <- traverseAtom appReduceTraversalDef x'
+        f <- traverseAtom recur f'
+        x <- traverseAtom recur x'
         case f of
-          TabVal b body ->
-            Atom <$> (dropSub $ extendR (b@>x) $ evalBlockE appReduceTraversalDef body)
+          Lam (Abs b (arr, body)) | shouldReduce arr ->
+            Atom <$> dropSub (extendR (b@>x) $ evalBlockE recur body)
           _ -> return $ App f x
-      _ -> traverseExpr appReduceTraversalDef expr
+      _ -> traverseExpr recur expr
 
 -- With `def = (traverseExpr def, traverseAtom def)` this should be a no-op
 traverseDecls :: (MonadEmbed m, MonadReader SubstEnv m)

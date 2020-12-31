@@ -52,20 +52,26 @@ inferModule :: TopEnv -> UModule -> ExceptWithOutputs Module
 inferModule scope (UModule decls) = do
   let infer = mapM_ (inferUDecl True) decls
   res <- runSolverT scope $ do
-    res <- zonk =<< runEmbedT (runReaderT (runReaderT infer mempty) Nothing) scope
+    ((), (bindings, decls')) <- zonk =<< runEmbedT (runReaderT (runReaderT infer mempty) Nothing) scope
     env <- look
     unsolvedVars <- zonk $ unsolved env
     logInfo TypePass $
-      pprint (asModule Typed res)
+      pprint (asModule Typed (bindings, decls'))
       ++ "\n\nUnsolved variables: " ++ pprint unsolvedVars
-    return res
-  return $ asModule Core res
-  where asModule variant ((), (bindings, decls')) =
+    return (bindings, decls')
+  exceptNoOutputs $ cleanupSynth $ asModule Core res
+  where asModule variant (bindings, decls') =
           let bindings' = envFilter bindings $ \(_, b) -> case b of
                             DataBoundTypeCon _   -> True
                             DataBoundDataCon _ _ -> True
                             _ -> False
           in Module variant decls' bindings'
+
+cleanupSynth :: Module -> Except Module
+cleanupSynth (Module v decls bindings) = do
+  decls' <- fst . fst <$> runSubstEmbedT
+              (traverseDecls (appReduceTraversalDef (== ClassArrow)) decls) mempty
+  return $ Module v decls' bindings
 
 checkSigma :: UExpr -> (Type -> RequiredTy Type) -> SigmaType -> UInferM Atom
 checkSigma expr reqCon sTy = case sTy of
@@ -801,9 +807,9 @@ makeClassDict ctx ty = do
   -- the set of all lambda-bound class dictionaries in scope, which might be
   -- used to solve it.
   scope <- getScope
-  let lamBound = getLamBoundDicts scope
-      thunkArg = Record $ Unlabeled (Var <$> lamBound)
-      thunkTy = Pi $ makeAbs (Ignore $ getType thunkArg) (PureArrow, ty)
+  lamBound <- getLamBoundDicts scope
+  let thunkArg = Record $ Unlabeled lamBound
+      thunkTy = Pi $ makeAbs (Ignore $ getType thunkArg) (ClassArrow, ty)
   -- During simplification (and also during type-level reduction), once we
   -- have solved the instance, this App will be beta-reduced away. But until
   -- we solve it, the App allows us to safely refer to the result of the
@@ -811,7 +817,7 @@ makeClassDict ctx ty = do
   v <- freshInferenceName thunkTy
   -- Remember that we want to solve this class dictionary, and track where it
   -- came from.
-  extend $ mempty {wantedDictVars=v@>(ctx, ty, map varType lamBound)}
+  extend $ mempty {wantedDictVars=v@>(ctx, ty, map getType lamBound)}
   emit $ App (Var $ v:>thunkTy) thunkArg
 
 -- Synthesis produces a name identifying the instance, a "thunk" atom that
@@ -918,10 +924,12 @@ getInstances scope = do
   (v, LetBound InstanceLet _) <- getBindings scope
   return v
 
-getLamBoundDicts :: Scope -> [Var]
-getLamBoundDicts scope = do
-  (v, LamBound ClassArrow) <- getBindings scope
-  return v
+getLamBoundDicts :: MonadEmbed m => Scope -> m [Atom]
+getLamBoundDicts scope = flip foldMapM (getBindings scope) $ \case
+  (v, LamBound ClassArrow) -> case varType v of
+     RecordTy (NoExt _) -> getUnpacked $ Var v
+     _ -> return [Var v]
+  _ -> return []
 
 synthWithOptions :: ( MonadCat SolverEnv m, MonadEmbed m, MonadError Err m
                     , MonadWriter [Output] m)
@@ -933,7 +941,7 @@ synthOption :: ( MonadCat SolverEnv m, MonadEmbed m, MonadError Err m
                => SrcCtx -> Type -> Type -> (String, Atom -> m Atom) -> m SynthAttempt
 synthOption ctx reqTy haveTy (name, makeDict) = do
   -- Locally unify and construct the dictionary, ignoring unification errors.
-  let scopedSolve = scoped $ zonk =<< buildLam (Ignore haveTy) PureArrow
+  let scopedSolve = scoped $ zonk =<< buildLam (Ignore haveTy) ClassArrow
                       (instantiateAndCheck ctx reqTy <=< makeDict)
   res <- (Right <$> scopedSolve) `catchError` (return . Left)
   case res of
@@ -944,11 +952,12 @@ synthOption ctx reqTy haveTy (name, makeDict) = do
       -- be sure this will be a match.
       let sure = null (unsolved currentEnv `envIntersect` solverSub localEnv)
       if sure then do
+        let newvars = scopelessSubst (solverSub localEnv) $ unsolved localEnv
         logInfo SynthPass $
           "Found solution to " <> pprint reqTy
           <> " using " <> name <> "."
           <> "\n  Solution:" <> pprint atom
-          <> "\n  New inference variables:" <> pprint (unsolved localEnv)
+          <> "\n  New inference variables:" <> pprint newvars
         return ([(name, atom, localEnv)], SynthFoundAll)
       else return ([], SynthCouldFindMore)
 
@@ -1083,11 +1092,11 @@ solveLocal m = do
   (ans, env@SolverEnv{solverSub=sub, solverVars=freshVars}) <- scoped $ do
     -- This might get expensive. TODO: revisit once we can measure performance.
     let run = do
-          ans <- m
+          stuff <- embedScoped m
           withSolverContext "While locally solving constraints for"
-            ans resolveConstraints
-          return ans
-    (ans, embedEnv) <- zonk =<< embedScoped run
+            stuff resolveConstraints
+          return stuff
+    (ans, embedEnv) <- zonk =<< run
     embedExtend embedEnv
     return ans
   extend $ mempty{ solverVars=scopelessSubst sub $ unsolved env
