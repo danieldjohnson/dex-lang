@@ -659,11 +659,11 @@ getSrcCtx = lift ask
 -- === constraint solver ===
 
 data SolverEnv = SolverEnv
-  { solverVars :: Env Kind        -- All variables we need to solve for.
-  , wantedDictVars :: Env (Scope, SrcCtx, Type)    -- Wanted typeclass instances. A variable that
-                                  -- appears as v@>ty in `wantedDictVars` should
-                                  -- resolve to a lambda of type `Unit -> ty`.
-  , solverSub  :: Env Type        -- Substitutions for solved vars.
+  { solverVars :: Env Kind          -- All variables we need to solve for.
+  , wantedDictVars :: Env ( SrcCtx  -- Where this dictionary was requested.
+                          , Type    -- Type of dictionary to synthesize.
+                          , [Type]) -- Locally ClassArrow-bound dictionaries.
+  , solverSub  :: Env Type          -- Substitutions for solved vars.
   }
 type SolverT m = CatT SolverEnv m
 
@@ -678,7 +678,8 @@ instance Monoid SolverEnv where
   mempty = SolverEnv mempty mempty mempty
   mappend = (<>)
 
-runSolverT :: (MonadError Err m, MonadWriter [Output] m, Subst a, Pretty a)
+runSolverT :: ( MonadError Err m, MonadWriter [Output] m, MonadFail m
+              , Subst a, Pretty a)
            => CatT SolverEnv m a -> m a
 runSolverT m = fmap fst $ flip runCatT mempty $ do
   ans <- m
@@ -700,7 +701,7 @@ withZonkedContext ans m = catchError m $ \(Err e p s) -> do
 
 -- Resolve any deferred typeclass constraints.
 resolveConstraints :: ( MonadError Err m, MonadCat SolverEnv m
-                      , MonadWriter [Output] m) => m ()
+                      , MonadWriter [Output] m, MonadFail m) => m ()
 resolveConstraints = go 0 where
   go i = do
     dicts <- looks unsolvedDicts
@@ -708,8 +709,8 @@ resolveConstraints = go 0 where
       -- If we took too long, throw an error.
       when (i >= maxIters) throwMaxItersError
       -- Try to solve each dictionary.
-      solved <- forM (envPairs dicts) $ \(v, (scope, ctx, ty)) -> do
-        soln <- trySynth scope ctx ty
+      solved <- forM (envPairs dicts) $ \(v, (ctx, dictTy, haveTys)) -> do
+        soln <- trySynth ctx dictTy haveTys
         case soln of
           Just dict -> bindQ (v:>()) dict >> return True
           Nothing -> return False
@@ -760,22 +761,6 @@ freshType k = Var . (:>k) <$> freshInferenceName k
 freshEff :: (MonadError Err m, MonadCat SolverEnv m) => m EffectRow
 freshEff = EffectRow mempty . Just <$> freshInferenceName EffKind
 
-makeClassDict :: (MonadError Err m, MonadCat SolverEnv m, MonadEmbed m)
-              => SrcCtx -> Type -> m Atom
-makeClassDict ctx ty = do
-  scope <- getScope
-  -- Synthesis results in a "thunk" that we have to call, since we might need
-  -- to run computation to emit the dictionary.
-  -- During simplification (and also during type-level reduction), once we
-  -- have solved the instance, this App will be beta-reduced away. But until
-  -- we solve it, the App allows us to safely refer to the result of the
-  -- unknown computation.
-  v <- freshInferenceName thunkTy
-  -- Remember what type we are solving for, so we can synthesize it later.
-  extend $ mempty {wantedDictVars=v@>(scope, ctx, ty)}
-  emit $ App (Var $ v:>thunkTy) UnitVal
-  where thunkTy = Pi $ makeAbs (Ignore UnitTy) (PureArrow, ty)
-
 bindQ :: (MonadCat SolverEnv m, MonadError Err m, Pretty v) => VarP v -> Type -> m ()
 bindQ v t | v `occursIn` t = throw TypeErr $ "Occurs check failure: " ++ pprint (v, t)
           | hasSkolems t = throw TypeErr "Can't unify with skolem vars"
@@ -783,9 +768,30 @@ bindQ v t | v `occursIn` t = throw TypeErr $ "Occurs check failure: " ++ pprint 
 
 -- === typeclass dictionary synthesizer ===
 
+makeClassDict :: (MonadError Err m, MonadCat SolverEnv m, MonadEmbed m)
+              => SrcCtx -> Type -> m Atom
+makeClassDict ctx ty = do
+  -- Synthesis results in a "thunk" that we have to call, since we might need
+  -- to run computation to emit the dictionary. This thunk takes as arguments
+  -- the set of all lambda-bound class dictionaries in scope, which might be
+  -- used to solve it.
+  scope <- getScope
+  let lamBound = getLamBoundDicts scope
+      thunkArg = Record $ Unlabeled (Var <$> lamBound)
+      thunkTy = Pi $ makeAbs (Ignore $ getType thunkArg) (PureArrow, ty)
+  -- During simplification (and also during type-level reduction), once we
+  -- have solved the instance, this App will be beta-reduced away. But until
+  -- we solve it, the App allows us to safely refer to the result of the
+  -- unknown computation.
+  v <- freshInferenceName thunkTy
+  -- Remember that we want to solve this class dictionary, and track where it
+  -- came from.
+  extend $ mempty {wantedDictVars=v@>(ctx, ty, map varType lamBound)}
+  emit $ App (Var $ v:>thunkTy) thunkArg
+
 -- Synthesis produces a name identifying the instance, a "thunk" atom that
 -- computes the dictionary, and possible additional constraints to solve for.
-type SynthOutcome = [(Name, Atom, SolverEnv)]
+type SynthOutcome = [(String, Atom, SolverEnv)]
 
 -- If an instance might apply after solving for some currently-unknown type
 -- variables, we should keep trying.
@@ -802,17 +808,18 @@ instance Monoid SynthConfidence where
 
 -- Try to synthesize an instance dictionary. If the results depend on unknown
 -- inference variables, this may return Nothing.
-trySynth :: (MonadCat SolverEnv m, MonadError Err m, MonadWriter [Output] m)
-         => Scope -> SrcCtx -> Type -> m (Maybe Atom)
-trySynth scope ctx ty = addSrcContext ctx $ do
-  scope' <- zonk scope
-  ty' <- zonk ty
+trySynth :: ( MonadCat SolverEnv m, MonadError Err m, MonadWriter [Output] m
+            , MonadFail m)
+         => SrcCtx -> Type -> [Type] -> m (Maybe Atom)
+trySynth ctx reqTy haveTys = addSrcContext ctx $ do
+  reqTy' <- zonk reqTy
+  haveTys' <- zonk haveTys
   -- Run in a local scope.
-  (result, (_, decls)) <- runEmbedT (synthInScope ctx ty') scope'
+  (result, (_, decls)) <- runEmbedT (synthInScope ctx reqTy' haveTys') mempty
   throwIf (not $ null decls) CompilerErr "Unexpected decls in synthWithOptions"
   case result of
     (solutions@(_:_:_), confidence) -> throw TypeErr $
-      "Multiple candidate class dictionaries for: " ++ pprint ty'
+      "Multiple candidate class dictionaries for: " ++ pprint reqTy'
            ++ "\n" ++ pprint dictNames ++ andPossiblyOthers
       where
         dictNames = map (\(n, _, _) -> n) solutions
@@ -824,37 +831,43 @@ trySynth scope ctx ty = addSrcContext ctx $ do
     ([(_, dict, env)], SynthFoundAll) ->
       extend env >> return (Just dict)
     ([], SynthFoundAll) -> throw TypeErr $
-      "Couldn't synthesize a class dictionary for: " ++ pprint ty'
+      "Couldn't synthesize a class dictionary for: " ++ pprint reqTy'
 
 -- Try to find a dictionary, trying lambda-bound dictionaries before global
 -- instances.
 synthInScope :: ( MonadCat SolverEnv m, MonadEmbed m, MonadError Err m
-                , MonadWriter [Output] m)
-             => SrcCtx -> Type -> m SynthAttempt
-synthInScope ctx ty = do
+                , MonadWriter [Output] m, MonadFail m)
+             => SrcCtx -> Type -> [Type] -> m SynthAttempt
+synthInScope ctx reqTy haveTys = do
   scope <- getScope
-  -- first, try to find a lam-bound class dict we can use.
+  let haveArgTy = RecordTy $ NoExt $ Unlabeled haveTys
+  -- first, try to use one of the class dictionaries we are passed
   let lamBoundAndSuperclassDicts = do
-        v <- getLamBoundDicts scope
-        dict <- useDictOrSuperclass ctx scope (Var v)
-        return (varName v, dict)
-  lamBoundAttempt <- synthWithOptions ctx ty lamBoundAndSuperclassDicts
+        (i, ty) <- enumerate haveTys
+        let extract arg = (!! i) <$> getUnpacked arg
+        ("a locally-bound instance dictionary for " ++ pprint ty, extract) : do
+          (name, getSuper) <- findSuperclass ctx scope
+          return ( "superclass instance " ++ pprint name ++
+                   " using a locally-bound instance dictionary for "
+                   ++ pprint ty
+                 , getSuper <=< extract)
+  lamBoundAttempt <- synthWithOptions ctx reqTy haveArgTy lamBoundAndSuperclassDicts
   case lamBoundAttempt of
     ([], SynthFoundAll) -> do
       -- if we are sure we can't find it as a lam-bound class, try to find
       -- a standalone instance.
       let instanceDicts = getInstances scope
-      synthWithOptions ctx ty $
-        (\v -> (varName v, return $ Var v)) <$>instanceDicts
+      synthWithOptions ctx reqTy haveArgTy $
+        (\v -> (pprint (varName v), const $ return $ Var v)) <$> instanceDicts
     found -> return found
 
 -- TODO: this doesn't de-dup, so we'll get multiple results if we have a
 -- diamond-shaped hierarchy.
-useDictOrSuperclass :: (MonadCat SolverEnv m, MonadEmbed m, MonadError Err m)
-           => SrcCtx -> Scope -> Atom -> [m Atom]
-useDictOrSuperclass ctx scope dict = return dict : do
+findSuperclass :: (MonadCat SolverEnv m, MonadEmbed m, MonadError Err m)
+           => SrcCtx -> Scope -> [(Name, Atom -> m Atom)]
+findSuperclass ctx scope = do
   (f, LetBound SuperclassLet _) <- getBindings scope
-  return $ tryApply ctx (Var f) dict
+  return (varName f, tryApply ctx (Var f))
 
 tryApply :: (MonadCat SolverEnv m, MonadEmbed m, MonadError Err m)
          => SrcCtx -> Atom -> Atom -> m Atom
@@ -883,39 +896,38 @@ getLamBoundDicts scope = do
 
 synthWithOptions :: ( MonadCat SolverEnv m, MonadEmbed m, MonadError Err m
                     , MonadWriter [Output] m)
-                 => SrcCtx -> Type -> [(Name, m Atom)] -> m SynthAttempt
-synthWithOptions ctx ty = foldMapM (synthOption ctx ty)
+                 => SrcCtx -> Type -> Type -> [(String, Atom -> m Atom)] -> m SynthAttempt
+synthWithOptions ctx reqTy haveTy = foldMapM (synthOption ctx reqTy haveTy)
 
 synthOption :: ( MonadCat SolverEnv m, MonadEmbed m, MonadError Err m
                , MonadWriter [Output] m)
-               => SrcCtx -> Type -> (Name, m Atom) -> m SynthAttempt
-synthOption ctx ty (name, dict) = do
+               => SrcCtx -> Type -> Type -> (String, Atom -> m Atom) -> m SynthAttempt
+synthOption ctx reqTy haveTy (name, makeDict) = do
   -- Locally unify and construct the dictionary, ignoring unification errors.
-  let scopedSolve = scoped $ buildScoped
-                    $ zonk =<< instantiateAndCheck ctx ty =<< dict
+  let scopedSolve = scoped $ buildLam (Ignore haveTy) PureArrow $ \have ->
+                      zonk =<< instantiateAndCheck ctx reqTy =<< makeDict have
   res <- (Right <$> scopedSolve) `catchError` (return . Left)
   case res of
     Left err -> do
-      logInfo SynthPass $ "Couldn't solve " <> pprint ty
-          <> " using " <> pprint name <> ":\n" <> pprint err
+      logInfo SynthPass $ "Couldn't solve " <> pprint reqTy
+          <> " using " <> name <> ":\n" <> pprint err
       return ([], SynthFoundAll)
-    Right (block, localEnv) -> do
+    Right (atom, localEnv) -> do
       currentEnv <- look
       -- Did we bind any type variables in the requested type? If so, we can't
       -- be sure this will be a match.
       let sure = null (unsolved currentEnv `envIntersect` solverSub localEnv)
       if sure then do
         logInfo SynthPass $
-          "Found solution to " <> pprint ty
-          <> " using " <> pprint name <> "."
-          <> "\n  Solution:" <> pprint block
+          "Found solution to " <> pprint reqTy
+          <> " using " <> name <> "."
+          <> "\n  Solution:" <> pprint atom
           <> "\n  New inference variables:" <> pprint (solverVars localEnv)
-        let thunk = Lam $ makeAbs (Ignore UnitTy) (PureArrow, block) 
-        return ([(name, thunk, localEnv)], SynthFoundAll)
+        return ([(name, atom, localEnv)], SynthFoundAll)
       else do
         logInfo SynthPass $
-          "Found possible future solution to " <> pprint ty <>
-          " using " <> pprint name <> " (depending on unsolved type variables)"
+          "Found possible future solution to " <> pprint reqTy <>
+          " using " <> name <> " (depending on unsolved type variables)"
         return ([], SynthCouldFindMore)
 
 instantiateAndCheck :: (MonadCat SolverEnv m, MonadEmbed m, MonadError Err m)
@@ -1018,7 +1030,7 @@ unifyEff r1 r2 = do
 unsolved :: SolverEnv -> Env Kind
 unsolved SolverEnv{solverVars=scope, solverSub=sub} = scope `envDiff` sub
 
-unsolvedDicts :: SolverEnv -> Env (Scope, SrcCtx, Type)
+unsolvedDicts :: SolverEnv -> Env (SrcCtx, Type, [Type])
 unsolvedDicts SolverEnv{wantedDictVars=wanted, solverSub=sub} =
   wanted `envDiff` sub
 
@@ -1051,11 +1063,11 @@ solveLocal m = do
     embedExtend embedEnv
     return ans
   extend $ SolverEnv{ solverVars=scopelessSubst sub $ unsolved env
-                    , wantedDictVars=subWantedDicts sub $ unsolvedDicts env
+                    , wantedDictVars=substUnsolvedDicts sub $ unsolvedDicts env
                     , solverSub=sub `envDiff` freshVars}
   return ans
-  where subWantedDicts sub wanted = flip fmap wanted $ \(scope, ctx, ty) ->
-          (scopelessSubst sub scope, ctx, scopelessSubst sub ty)
+  where substUnsolvedDicts sub env = flip fmap env $ \(ctx, reqTy, haveTys) ->
+          (ctx, scopelessSubst sub reqTy, scopelessSubst sub haveTys)
 
 checkLeaks :: ( MonadCat SolverEnv m, MonadEmbed m, MonadError Err m
               , HasType a, Subst a) => [Var] -> m a -> m a

@@ -404,7 +404,9 @@ prettyProjection idxs (name :> ty) = prettyPrec uproj where
         ty'' = toList types !! i
         pats = (\(j,_)-> if i == j then pat' else uignore) <$> enumerate types
         (fieldName, _) = toList (reflectLabels types) !! i
-        hint = Name SourceName (fromString fieldName) 0
+        hintString = case fieldName of InternalSingletonLabel -> "v"
+                                       _ -> fromString fieldName
+        hint = Name SourceName hintString 0
         in (ty'', nosrc $ UPatRecord $ NoExt pats, fromMaybe hint eltName)
       PairTy x _ | i == 0 ->
         (x, nosrc $ UPatPair pat' uignore, fromMaybe "a" eltName)

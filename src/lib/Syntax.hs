@@ -1481,7 +1481,7 @@ pattern NoExt a = Ext a Nothing
 -- concrete syntax and will be rejected by the parser (although there wouldn't
 -- be any serious problems with overloading a user-written label).
 pattern InternalSingletonLabel :: Label
-pattern InternalSingletonLabel = "%UNLABELED%"
+pattern InternalSingletonLabel = "%"
 
 _getUnlabeled :: LabeledItems a -> Maybe [a]
 _getUnlabeled (LabeledItems items) = case length items of
