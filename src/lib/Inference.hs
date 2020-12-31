@@ -53,7 +53,11 @@ inferModule scope (UModule decls) = do
   let infer = mapM_ (inferUDecl True) decls
   res <- runSolverT $ do
     res <- runEmbedT (runReaderT (runReaderT infer mempty) Nothing) scope
-    logInfo TypePass $ pprint $ asModule Typed res
+    env <- look
+    logInfo TypePass $
+      pprint (asModule Typed res)
+      ++ "\n\nUnsolved variables: " ++ pprint (unsolved env)
+      ++ "\nSolved variables: " ++ pprint (solverSub env)
     return res
   return $ asModule Core res
   where asModule variant ((), (bindings, decls')) =
@@ -891,7 +895,10 @@ synthOption ctx ty (name, dict) = do
                     $ zonk =<< instantiateAndCheck ctx ty =<< dict
   res <- (Right <$> scopedSolve) `catchError` (return . Left)
   case res of
-    Left _ -> return ([], SynthFoundAll)
+    Left err -> do
+      logInfo SynthPass $ "Couldn't solve " <> pprint ty
+          <> " using " <> pprint name <> ":\n" <> pprint err
+      return ([], SynthFoundAll)
     Right (block, localEnv) -> do
       currentEnv <- look
       -- Did we bind any type variables in the requested type? If so, we can't
@@ -899,14 +906,16 @@ synthOption ctx ty (name, dict) = do
       let sure = null (unsolved currentEnv `envIntersect` solverSub localEnv)
       if sure then do
         logInfo SynthPass $
-          "Found confident solution to " <> pprint ty
+          "Found solution to " <> pprint ty
           <> " using " <> pprint name <> "."
           <> "\n  Solution:" <> pprint block
           <> "\n  New inference variables:" <> pprint (solverVars localEnv)
         let thunk = Lam $ makeAbs (Ignore UnitTy) (PureArrow, block) 
         return ([(name, thunk, localEnv)], SynthFoundAll)
       else do
-        logInfo SynthPass $ "Found possible future solution to " <> pprint ty <> " using " <> pprint name
+        logInfo SynthPass $
+          "Found possible future solution to " <> pprint ty <>
+          " using " <> pprint name <> " (depending on unsolved type variables)"
         return ([], SynthCouldFindMore)
 
 instantiateAndCheck :: (MonadCat SolverEnv m, MonadEmbed m, MonadError Err m)
@@ -1036,13 +1045,17 @@ renameForPrinting x = (scopelessSubst substEnv x, newNames)
 
 solveLocal :: (MonadCat SolverEnv m, MonadEmbed m, Subst a) => m a -> m a
 solveLocal m = do
-  (ans, env) <- scoped $ do
+  (ans, env@SolverEnv{solverSub=sub, solverVars=freshVars}) <- scoped $ do
     -- This might get expensive. TODO: revisit once we can measure performance.
     (ans, embedEnv) <- zonk =<< embedScoped m
     embedExtend embedEnv
     return ans
-  extend $ SolverEnv (unsolved env) (unsolvedDicts env) (solverSub env `envDiff` unsolved env)
+  extend $ SolverEnv{ solverVars=scopelessSubst sub $ unsolved env
+                    , wantedDictVars=subWantedDicts sub $ unsolvedDicts env
+                    , solverSub=sub `envDiff` freshVars}
   return ans
+  where subWantedDicts sub wanted = flip fmap wanted $ \(scope, ctx, ty) ->
+          (scopelessSubst sub scope, ctx, scopelessSubst sub ty)
 
 checkLeaks :: ( MonadCat SolverEnv m, MonadEmbed m, MonadError Err m
               , HasType a, Subst a) => [Var] -> m a -> m a
@@ -1054,9 +1067,12 @@ checkLeaks tvs m = do
   unless (null resultTypeLeaks) $
     throw TypeErr $ "Leaked local variable `" ++ pprint (head resultTypeLeaks) ++
                     "` in result type " ++ pprint (getType ans)
-  forM_ (solverSub env) $ \ty ->
+  forM_ (envPairs $ solverSub env) $ \(v, ty) ->
     forM_ tvs $ \tv ->
-      throwIf (tv `occursIn` ty) TypeErr $ "Leaked type variable: " ++ pprint tv
+      throwIf (tv `occursIn` ty) TypeErr $
+        "Leaked type variable `" ++ pprint tv
+        ++ "` in value `" ++ pprint ty
+        ++ "` of inference variable `" ++ pprint v ++ "`"
   extend env
   return ans
 
