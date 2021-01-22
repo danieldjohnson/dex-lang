@@ -96,7 +96,7 @@ emitAnn ann expr = do
   emitTo v ann expr
 
 -- Guarantees that the name will be used, possibly with a modified counter
-emitTo :: MonadBuilder m => Name -> LetAnn -> Expr -> m Atom
+emitTo :: (HasCallStack, MonadBuilder m) => Name -> LetAnn -> Expr -> m Atom
 emitTo name ann expr = do
   scope <- getScope
   -- Deshadow type because types from DataDef may have binders that shadow local vars

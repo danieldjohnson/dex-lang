@@ -8,7 +8,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE ViewPatterns #-}
 
-module Inference (inferModule, synthModule, synthesize) where
+module Inference (inferModule, synthesize) where
 
 import Control.Applicative
 import Control.Monad
@@ -52,13 +52,20 @@ pattern Check t <-
 
 inferModule :: Bindings -> UModule -> ExceptWithOutputs Module
 inferModule scope (UModule decls) = do
-  ((), (bindings, decls')) <- runUInferM mempty scope $
-                                mapM_ (inferUDecl True) decls
-  let bindings' = envFilter bindings \(_, b) -> case b of
-                    DataBoundTypeCon _   -> True
-                    DataBoundDataCon _ _ -> True
-                    _ -> False
-  return $ Module Typed decls' bindings'
+  (bindings, (_, decls')) <- runUInferM mempty scope go
+  return $ Module Core decls' bindings
+  where
+    go = do
+      ((), (bindings, decls')) <- builderScoped $ mapM_ (inferUDecl True) decls
+      let bindings' = envFilter bindings \(_, b) -> case b of
+                        DataBoundTypeCon _   -> True
+                        DataBoundDataCon _ _ -> True
+                        _ -> False
+      logInfo TypePass $ pprint (Module Typed decls' bindings')
+      -- Synthesize all dictionaries.
+      (decls'', _) <- traverseDecls (traverseHoles synthesizeInInference) =<< zonk decls'
+      mapM_ emitDecl decls''
+      return bindings'
 
 runUInferM :: (Subst a, Pretty a)
            => SubstEnv -> Scope -> UInferM a
@@ -108,7 +115,8 @@ instantiateSigma f = case getType f of
     instantiateSigma ans
   Pi (Abs b (ClassArrow, _)) -> do
     ctx <- getSrcCtx
-    instantiateSigma =<< emitZonked (App f (Con $ ClassDictHole ctx $ binderType b))
+    hole <- freshClassDictHole ctx $ binderType b
+    instantiateSigma =<< emitZonked (App f hole)
   _ -> return f
 
 checkOrInferRho :: UExpr -> RequiredTy RhoType -> UInferM Atom
@@ -415,6 +423,11 @@ mkSuperclass ty = do
   l <- freshClassGenName
   return (nameToLabel l, ty')
 
+freshClassDictHole :: SrcCtx -> Type -> UInferM Atom
+freshClassDictHole ctx ty = do
+  name <- freshInferenceName ty
+  return $ Con $ ClassDictHole ctx ty (Var $ name :> ty)
+
 -- TODO: just make Name and Label the same thing
 nameToLabel :: Name -> Label
 nameToLabel = pprint
@@ -510,7 +523,7 @@ checkInstance Empty ty methods = do
     TypeCon def@(DataDef className _ _) params ->
       case applyDataDefParams def params of
         ClassDictDef _ superclassTys methodTys -> do
-          let superclassHoles = fmap (Con . ClassDictHole Nothing) superclassTys
+          superclassHoles <- mapM (freshClassDictHole Nothing) superclassTys
           methods' <- checkMethodDefs className methodTys methods
           return $ ClassDictCon def params superclassHoles methods'
         _ -> throw TypeErr $ "Not a valid instance type: " ++ pprint ty
@@ -824,13 +837,6 @@ getSrcCtx = lift ask
 
 -- === typeclass dictionary synthesizer ===
 
-synthModule :: Scope -> Module -> ExceptWithOutputs Module
-synthModule scope (Module Typed decls bindings) = do
-  decls' <- fst . fst <$> runSubstBuilderT
-              (traverseDecls (traverseHoles synthesize) decls) scope
-  return $ Module Core decls' bindings
-synthModule _ _ = error "Unexpected IR variant"
-
 -- Synthesis algorithm:
 -- 1. Run type inference for every possible instance, and filter out those
 --    that do not unify. At this point, do not recursively synthesize any
@@ -850,22 +856,37 @@ synthesize ctx ty = do
       [solution] -> return solution
       _ -> throw TypeErr $ "Multiple candidate class dictionaries for: " ++ pprint ty
             ++ concatMap (\(name, _) -> "\n  - " ++ name) solutions
-    let (res, out) = runExceptWithOutputs $
-                        runUInferM substEnv scope (buildScoped build)
+    let buildAndRecur = addContext ("While synthesizing " ++ pprint ty ++ " using " ++ name) do
+            logInfo SynthPass $ "Synthesizing " ++ pprint ty ++ " using " ++ name
+            block <- buildScoped build
+            dropSub $ traverseBlock (traverseHoles synthesizeInInference) block
+    let (res, out) = runExceptWithOutputs $ runUInferM substEnv scope buildAndRecur
     tell out
     case res of
       Left err -> throwError err
-      Right (block, _) -> do
-          logInfo SynthPass $ "Synthesizing " ++ pprint ty ++ " using " ++ name
-          addContext ("While synthesizing " ++ pprint ty ++ " using " ++ name) do
-            emitBlock =<< dropSub (traverseBlock (traverseHoles synthesize) block)
+      Right (block, _) -> emitBlock block
+
+synthesizeInInference :: SrcCtx -> Type -> Atom -> UInferM Atom
+synthesizeInInference ctx ty placeholder = do
+  uns <- looks unsolved
+  ty' <- zonk ty
+  unless (null $ uns `envIntersect` freeVars ty') $ throw TypeErr $
+    "Type variables in " ++ pprint ty' ++ " prevent synthesizing an instance."
+  result <- synthesize ctx ty'
+  -- Constrain our synthesized dictionary to match our placeholder.
+  scope' <- getScope
+  addSrcContext ctx $ constrainEq placeholder (typeReduceAtom scope' result)
+  return result
 
 traverseHoles :: (MonadReader SubstEnv m, MonadBuilder m)
-              => (SrcCtx -> Type -> m Atom) -> TraversalDef m
+              => (SrcCtx -> Type -> Atom -> m Atom) -> TraversalDef m
 traverseHoles fillHole = (traverseDecl recur, traverseExpr recur, synthPassAtom)
   where
     synthPassAtom atom = case atom of
-      Con (ClassDictHole ctx ty) -> fillHole ctx =<< substBuilderR ty
+      Con (ClassDictHole ctx ty placeholder) -> do
+        ty' <- substBuilderR ty
+        placeholder' <- substBuilderR placeholder
+        fillHole ctx ty' placeholder'
       _ -> traverseAtom recur atom
     recur = traverseHoles fillHole
 

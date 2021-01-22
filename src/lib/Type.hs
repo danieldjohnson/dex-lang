@@ -437,7 +437,7 @@ instance CoreVariant (PrimOp a) where
 
 instance CoreVariant (PrimCon a) where
   checkVariant e = case e of
-    ClassDictHole _ _ -> goneBy Core
+    ClassDictHole _ _ _ -> goneBy Core
     _ -> alwaysAllowed
 
 instance CoreVariant (PrimHof a) where
@@ -595,7 +595,7 @@ typeCheckCon con = case con of
   PairCon x y -> PairTy <$> typeCheck x <*> typeCheck y
   UnitCon -> return UnitTy
   SumAsProd ty tag _ -> tag |:TagRepTy >> return ty  -- TODO: check!
-  ClassDictHole _ ty -> ty |: TyKind >> return ty
+  ClassDictHole _ ty v -> ty |: TyKind >> v |: ty >> return ty
   IntRangeVal     l h i -> i|:IdxRepTy >> return (TC $ IntRange     l h)
   IndexRangeVal t l h i -> i|:IdxRepTy >> return (TC $ IndexRange t l h)
   IndexSliceVal _ _ _ -> error "not implemented"

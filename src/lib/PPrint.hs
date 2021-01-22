@@ -237,7 +237,7 @@ prettyPrecPrimCon con = case con of
   UnitCon     -> atPrec ArgPrec "()"
   SumAsProd ty tag payload -> atPrec LowestPrec $
     "SumAsProd" <+> pApp ty <+> pApp tag <+> pApp payload
-  ClassDictHole _ _ -> atPrec ArgPrec "_"
+  ClassDictHole _ _ placeholder -> prettyPrec placeholder
   IntRangeVal     l h i -> atPrec LowestPrec $ pApp i <> "@" <> pApp (IntRange     l h)
   IndexRangeVal t l h i -> atPrec LowestPrec $ pApp i <> "@" <> pApp (IndexRange t l h)
   ParIndexCon ty i ->

@@ -195,9 +195,7 @@ lookupBindings scope v = x
 evalUModule :: Bindings -> UModule -> TopPassM Bindings
 evalUModule env untyped = do
   logPass Parse untyped
-  typed <- liftExceptWithOutputsIO logTop $ inferModule env untyped
-  checkPass TypePass typed
-  synthed <- liftExceptWithOutputsIO logTop $ synthModule env typed
+  synthed <- liftExceptWithOutputsIO logTop $ inferModule env untyped
   -- TODO: check that the type of module exports doesn't change from here on
   checkPass SynthPass synthed
   let defunctionalized = simplifyModule env synthed
