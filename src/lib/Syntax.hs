@@ -86,6 +86,7 @@ import Data.Word
 import Data.String (IsString, fromString)
 import Foreign.Ptr
 import GHC.Generics
+import GHC.Stack (HasCallStack)
 
 import Env
 import Util (IsBool (..), enumerate, (...))
@@ -1027,6 +1028,7 @@ instance BindsVars DataConRefBinding where
 instance Eq Atom where
   Var v == Var v' = v == v'
   Pi ab == Pi ab' = ab == ab'
+  -- Lam ab == Lam ab' = ab == ab'
   DataCon def params con args == DataCon def' params' con' args' =
     def == def' && params == params' && con == con' && args == args'
   TypeCon def params == TypeCon def' params' = def == def' && params == params'
@@ -1040,6 +1042,9 @@ instance Eq Atom where
   Eff eff == Eff eff' = eff == eff'
   ProjectElt idxs v == ProjectElt idxs' v' = (idxs, v) == (idxs', v')
   _ == _ = False
+
+-- instance Eq Block where
+--   Block decls expr == Block decls' expr' = toList decls == toList decls' && expr == expr'
 
 instance Eq DataDef where
   DataDef name _ _ == DataDef name' _ _ = name == name'
@@ -1271,7 +1276,7 @@ substExtLabeledItemsTail env (Just v) = case envLookup env (v:>()) of
   Just (LabeledRow row) -> row
   _ -> error "Not a valid labeled row substitution"
 
-getProjection :: [Int] -> Atom -> Atom
+getProjection :: HasCallStack => [Int] -> Atom -> Atom
 getProjection [] a = a
 getProjection (i:is) a = case getProjection is a of
   Var v -> ProjectElt (NE.fromList [i]) v
@@ -1280,6 +1285,10 @@ getProjection (i:is) a = case getProjection is a of
   Record items -> toList items !! i
   PairVal x _ | i == 0 -> x
   PairVal _ y | i == 1 -> y
+  -- Special rule for class dict holes: Projecting a hole projects the
+  -- placeholder, which stands in for the ultimate result of the synthesized
+  -- dictionary.
+  Con (ClassDictHole _ _ placeholder) -> getProjection [i] placeholder
   _ -> error $ "Not a valid projection: " ++ show i ++ " of " ++ show a
 
 instance HasVars () where freeVars () = mempty

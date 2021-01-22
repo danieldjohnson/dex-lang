@@ -1,0 +1,32 @@
+
+
+data Generic a:Type = GenericRep rep:Type from:(rep -> a) to:(a -> rep)
+
+def toGeneric (GenericRep rep _ to : Generic a) ?=> (x: a) : rep =
+  to x
+
+def fromGeneric (GenericRep rep from _ : Generic a) ?=> (x: rep) : a =
+  from x
+
+:t toGeneric
+> ((a:Type) ?-> (pat:(Generic a)) ?=> a -> (\((GenericRep rep _ _)). rep) pat)
+
+@instance
+genericPair : Generic (a & b) = GenericRep (a & b) id id
+
+@instance
+genericEither : Generic (a | b) = GenericRep (a | b) id id
+
+@instance
+genericRecAB : Generic {a:a & b:b} =
+  from = \(a, b). {a, b}
+  to = \{a, b}. (a, b)
+  GenericRep (a & b) from to
+
+-- %passes parse typed synth simp
+:p toGeneric {a=1, b=2.0}
+> (1, 2.)
+
+-- %passes parse typed synth simp
+:p (fromGeneric (1, 2.)) : {a:Int & b:Float}
+> {a = 1, b = 2.}

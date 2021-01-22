@@ -61,10 +61,11 @@ inferModule scope (UModule decls) = do
                         DataBoundTypeCon _   -> True
                         DataBoundDataCon _ _ -> True
                         _ -> False
-      logInfo TypePass $ pprint (Module Typed decls' bindings')
+      decls'' <- zonk decls'
+      logInfo TypePass $ pprint (Module Typed decls'' bindings')
       -- Synthesize all dictionaries.
-      (decls'', _) <- traverseDecls (traverseHoles synthesizeInInference) =<< zonk decls'
-      mapM_ emitDecl decls''
+      (decls''', _) <- traverseDecls (traverseHoles synthesizeInInference) decls''
+      mapM_ emitDecl decls'''
       return bindings'
 
 runUInferM :: (Subst a, Pretty a)
@@ -504,17 +505,27 @@ inferULam :: UPatAnn -> Arrow -> UExpr -> UInferM Atom
 inferULam (p, ann) arr body = do
   argTy <- checkAnn ann
   -- TODO: worry about binder appearing in arrow?
-  buildLam (Bind $ patNameHint p :> argTy) arr
+  lam <- buildLam (Bind $ patNameHint p :> argTy) arr
     \x@(Var v) -> checkLeaks [v] $ withBindPat p x $ inferSigma body
+  -- XXX: Emit it as a separate declaration so that we don't "trivially" copy
+  -- a lambda containing a ClassDictHole, then try to synthesize it twice.
+  -- (This is a problem because both holes use the same placeholder but are
+  -- traversed separately!)
+  emit $ Atom lam
 
 checkULam :: UPatAnn -> UExpr -> PiType -> UInferM Atom
 checkULam (p, ann) body piTy = do
   let argTy = absArgType piTy
   checkAnn ann >>= constrainEq argTy
-  buildDepEffLam (Bind $ patNameHint p :> argTy)
+  lam <- buildDepEffLam (Bind $ patNameHint p :> argTy)
     ( \x -> return $ fst $ applyAbs piTy x)
     \x@(Var v) -> checkLeaks [v] $ withBindPat p x $
                       checkSigma body Suggest $ snd $ applyAbs piTy x
+  -- XXX: Emit it as a separate declaration so that we don't "trivially" copy
+  -- a lambda containing a ClassDictHole, then try to synthesize it twice.
+  -- (This is a problem because both holes use the same placeholder but are
+  -- traversed separately!)
+  emit $ Atom lam
 
 checkInstance :: Nest UPatAnnArrow -> UType -> [UMethodDef] -> UInferM Atom
 checkInstance Empty ty methods = do
@@ -867,15 +878,24 @@ synthesize ctx ty = do
       Right (block, _) -> emitBlock block
 
 synthesizeInInference :: SrcCtx -> Type -> Atom -> UInferM Atom
-synthesizeInInference ctx ty placeholder = do
+synthesizeInInference ctx ty placeholder = addSrcContext ctx $ do
   uns <- looks unsolved
   ty' <- zonk ty
   unless (null $ uns `envIntersect` freeVars ty') $ throw TypeErr $
     "Type variables in " ++ pprint ty' ++ " prevent synthesizing an instance."
-  result <- synthesize ctx ty'
-  -- Constrain our synthesized dictionary to match our placeholder.
+  block <- buildScoped $ synthesize ctx ty'
   scope' <- getScope
-  addSrcContext ctx $ constrainEq placeholder (typeReduceAtom scope' result)
+  -- TODO: would it be better to use Interpreter here?
+  result <- case typeReduceBlock scope' block of
+    Just atom -> do
+      logInfo SynthPass $ "Inlining synthesized dictionary for " ++ pprint ty' ++ ":\n" ++ pprint atom
+      return atom
+    Nothing -> do
+      logInfo SynthPass $ "Couldn't inline synthesized dictionary for " ++ pprint ty' ++ ":\n" ++ pprint block
+      withNameHint ("dict" :: Name) $ emitBlock block
+  -- Constrain our synthesized dictionary to match our placeholder.
+  addContext "While attempting to unify a synthesized dictionary with known constraints."
+    $ constrainEq placeholder result
   return result
 
 traverseHoles :: (MonadReader SubstEnv m, MonadBuilder m)
@@ -886,7 +906,7 @@ traverseHoles fillHole = (traverseDecl recur, traverseExpr recur, synthPassAtom)
       Con (ClassDictHole ctx ty placeholder) -> do
         ty' <- substBuilderR ty
         placeholder' <- substBuilderR placeholder
-        fillHole ctx ty' placeholder'
+        dropSub $ fillHole ctx ty' placeholder'
       _ -> traverseAtom recur atom
     recur = traverseHoles fillHole
 
@@ -1049,6 +1069,8 @@ unify t1 t2 = do
     _ | t1' == t2' -> return ()
     (t, Var v) | v `isin` vs -> bindQ v t
     (Var v, t) | v `isin` vs -> bindQ v t
+    (t, ProjectElt idxs v) | v `isin` vs -> unifyProjection idxs v t
+    (ProjectElt idxs v, t) | v `isin` vs -> unifyProjection idxs v t
     (Pi piTy, Pi piTy') -> do
        unify (absArgType piTy) (absArgType piTy')
        let v = Var $ freshSkolemVar (piTy, piTy') (absArgType piTy)
@@ -1064,9 +1086,15 @@ unify t1 t2 = do
       unifyExtLabeledItems items items'
     (TypeCon f xs, TypeCon f' xs')
       | f == f' && length xs == length xs' -> zipWithM_ unify xs xs'
+    (DataCon def params con xs, DataCon def' params' con' xs')
+      | def == def' && con == con'
+      && length params == length params' && length xs == length xs'
+        -> zipWithM_ unify params params' >> zipWithM_ unify xs xs'
     (TC con, TC con') | void con == void con' ->
       zipWithM_ unify (toList con) (toList con')
     (Eff eff, Eff eff') -> unifyEff eff eff'
+    (Record items, Record items') | void items == void items'
+      -> zipWithM_ unify (toList items) (toList items')
     _ -> throw TypeErr ""
 
 unifyExtLabeledItems :: (MonadCat SolverEnv m, MonadError Err m)
@@ -1112,6 +1140,34 @@ unifyEff r1 r2 = do
       unifyEff (EffectRow mempty t1) (extendEffRow extras2 newRow)
       unifyEff (extendEffRow extras1 newRow) (EffectRow mempty t2)
     _ -> throw TypeErr ""
+
+unifyProjection :: forall m. (MonadCat SolverEnv m, MonadError Err m)
+                => NE.NonEmpty Int -> Var -> Type -> m ()
+unifyProjection (ix NE.:| ixs) v ty = do
+    let pv = ProjectElt (ix NE.:| ixs) v
+        unproj = case NE.nonEmpty ixs of Nothing -> Var v
+                                         Just is' -> ProjectElt is' v
+    expanded <- case getType unproj of
+      TypeCon def@(DataDef _ tybs _) params -> do
+        (DataConDef _ argbs) <- case applyDataDefParams def params of
+          [conDef] -> return conDef
+          _ -> throw TypeErr "Projection of ADT with multiple constructors"
+        let env = foldMap (uncurry (@>)) $ zip (toList tybs) params
+        DataCon def params 0 <$> expandNestedBinders (env, mempty) argbs
+        where
+          expandNestedBinders :: ScopedSubstEnv -> Nest Binder -> m [Atom]
+          expandNestedBinders _ Empty = return []
+          expandNestedBinders env (Nest b bs) = do
+            newVar <- freshType $ subst env (binderAnn b)
+            let newSub = case b of Bind bindTo   -> bindTo @> newVar
+                                   Ignore _ -> mempty
+            bs' <- expandNestedBinders (env <> (newSub, boundVars b)) bs
+            return $ newVar : bs'
+      RecordTy (NoExt types) -> Record <$> mapM freshType types
+      PairTy a b -> PairVal <$> freshType a <*> freshType b
+      _ -> throw TypeErr $ "Unexpected projection " <> pprint pv
+    unify unproj expanded
+    unify (getProjection [ix] expanded) ty
 
 bindQ :: (MonadCat SolverEnv m, MonadError Err m) => Var -> Type -> m ()
 bindQ v t | v `occursIn` t = throw TypeErr $ "Occurs check failure: " ++ pprint (v, t)

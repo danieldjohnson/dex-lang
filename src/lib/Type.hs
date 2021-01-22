@@ -1054,7 +1054,8 @@ typeReduceAtom scope x = case x of
   Var (Name InferenceName _ _ :> _) -> x
   Var v -> case snd (scope ! v) of
     -- TODO: worry about effects!
-    LetBound PlainLet expr -> fromMaybe x $ typeReduceExpr scope expr
+    LetBound ann expr | ann /= NoInlineLet ->
+      fromMaybe x $ typeReduceExpr scope expr
     _ -> x
   TC con -> TC $ fmap (typeReduceAtom scope) con
   Pi (Abs b (arr, ty)) -> Pi $ Abs b (arr, typeReduceAtom (scope <> (fmap (,PiBound) $ binderAsEnv b)) ty)
@@ -1084,8 +1085,12 @@ typeReduceExpr scope expr = case expr of
     let x' = typeReduceAtom scope x
     -- TODO: Worry about variable capture. Should really carry a substitution.
     case f' of
-      Lam (Abs b (arr, block)) | arr == PureArrow || arr == ImplicitArrow ->
-        typeReduceBlock scope $ subst (b@>x', scope) block
-      TypeCon con xs -> Just $ TypeCon con $ xs ++ [x']
+      Lam (Abs b (arr, block))
+        | arr == PureArrow || arr == ImplicitArrow || arr == ClassArrow
+        -> typeReduceBlock scope $ subst (b@>x', scope) block
+      TypeCon def xs -> Just $ TypeCon def $ xs ++ [x']
+      DataCon def params con xs -> Just $ DataCon def params' con xs'
+         where DataDef _ paramBs _ = def
+               (params', xs') = splitAt (length paramBs) $ params ++ xs ++ [x']
       _ -> Nothing
   _ -> Nothing
