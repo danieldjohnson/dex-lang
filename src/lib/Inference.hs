@@ -383,7 +383,7 @@ inferUDecl True (UInterface superclasses tc methods) = do
   (tc', paramBs) <- inferUConDef tc
   dataDef <- buildDataDef tc' paramBs \params -> do
     extendR (newEnv paramBs params) $ do
-      conName <- freshClassGenName
+      conName <- freshClassGenName ("Mk" <> nameTag tc')
       superclasses' <- mkLabeledItems <$> mapM mkSuperclass superclasses
       methods'      <- mkLabeledItems <$> mapM mkMethod     methods
       return $ ClassDictDef conName superclasses' methods'
@@ -404,10 +404,10 @@ inferUDecl topLevel (UInstance maybeName argBinders instanceTy methods) = do
 inferUDecl False (UData      _ _  ) = error "data definitions should be top-level"
 inferUDecl False (UInterface _ _ _) = error "interface definitions should be top-level"
 
-freshClassGenName :: MonadBuilder m => m Name
-freshClassGenName = do
+freshClassGenName :: MonadBuilder m => Tag -> m Name
+freshClassGenName tag = do
   scope <- getScope
-  let v' = genFresh (Name TypeClassGenName "classgen" 0) scope
+  let v' = genFresh (Name TypeClassGenName tag 0) scope
   builderExtend $ asFst $ v' @> (UnitTy, UnknownBinder)
   return v'
 
@@ -421,7 +421,7 @@ mkSuperclass :: UType -> UInferM (Label, Type)
 mkSuperclass ty = do
   ty' <- checkUType ty
   -- TODO: think about the scope of these names
-  l <- freshClassGenName
+  l <- freshClassGenName "superclass"
   return (nameToLabel l, ty')
 
 freshClassDictHole :: SrcCtx -> Type -> UInferM Atom
@@ -463,7 +463,7 @@ emitSuperclassGetters def@(DataDef _ paramBs (ClassDictDef _ superclassTys _)) =
     f <- buildImplicitNaryLam paramBs \params -> do
       buildLam (Bind ("d":> TypeCon def params)) PureArrow \dict -> do
         return $ recGetHead l $ getProjection [0] dict
-    getterName <- freshClassGenName
+    getterName <- freshClassGenName "superclassGet"
     emitTo getterName SuperclassLet $ Atom f
 emitSuperclassGetters (DataDef _ _ _) = error "Not a class dictionary"
 

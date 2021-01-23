@@ -1057,11 +1057,14 @@ typeReduceAtom scope x = case x of
     LetBound ann expr | ann /= NoInlineLet ->
       fromMaybe x $ typeReduceExpr scope expr
     _ -> x
+  ProjectElt idxs v -> getProjection (toList idxs) $ rec $ Var v
   TC con -> TC $ fmap (typeReduceAtom scope) con
   Pi (Abs b (arr, ty)) -> Pi $ Abs b (arr, typeReduceAtom (scope <> (fmap (,PiBound) $ binderAsEnv b)) ty)
   TypeCon def params -> TypeCon (reduceDataDef def) (fmap rec params)
   RecordTy (Ext tys ext) -> RecordTy $ Ext (fmap rec tys) ext
   VariantTy (Ext tys ext) -> VariantTy $ Ext (fmap rec tys) ext
+  Record vs -> Record (fmap rec vs)
+  DataCon def params con args -> DataCon (reduceDataDef def) (fmap rec params) con (fmap rec args)
   ACase _ _ _ -> error "Not implemented"
   _ -> x
   where
